@@ -1,0 +1,182 @@
+{
+  "bank_name": "Federal Bank",
+  "product_type": "JLG",
+  "action_schema": [
+    {
+      "id": "1",
+      "stage_name": "Start Application",
+      "desc_for_llm": "Initial step to begin the JLG loan application process.",
+      "ui_id": "ui_1",
+      "api_id": null,
+      "next_success_action_id": "2",
+      "next_err_action_id": "err_generic"
+    },
+    {
+      "id": "2",
+      "stage_name": "Mobile Number Verification",
+      "desc_for_llm": "Collect and verify the applicant's mobile number via OTP.",
+      "ui_id": "ui_2",
+      "api_id": "api_1",
+      "next_success_action_id": "3",
+      "next_err_action_id": "err_generic"
+    },
+    {
+      "id": "3",
+      "stage_name": "Customer Information",
+      "desc_for_llm": "Collect basic customer details like name, date of birth, and address.",
+      "ui_id": "ui_3",
+      "api_id": null,
+      "next_success_action_id": "4",
+      "next_err_action_id": "err_generic"
+    },
+    {
+      "id": "4",
+      "stage_name": "KYC Document Upload",
+      "desc_for_llm": "Upload KYC documents such as Aadhaar Card or Voter ID.",
+      "ui_id": "ui_4",
+      "api_id": "api_2",
+      "next_success_action_id": "5",
+      "next_err_action_id": "err_kyc"
+    },
+    {
+      "id": "5",
+      "stage_name": "Group Formation",
+      "desc_for_llm": "Form a Joint Liability Group by adding other members.",
+      "ui_id": "ui_5",
+      "api_id": null,
+      "next_success_action_id": "6",
+      "next_err_action_id": "err_generic"
+    },
+    {
+      "id": "6",
+      "stage_name": "Loan Details",
+      "desc_for_llm": "Enter the required loan amount and tenure.",
+      "ui_id": "ui_6",
+      "api_id": null,
+      "next_success_action_id": "7",
+      "next_err_action_id": "err_generic"
+    },
+    {
+      "id": "7",
+      "stage_name": "Submit Application",
+      "desc_for_llm": "Review all details and submit the final application.",
+      "ui_id": "ui_7",
+      "api_id": "api_3",
+      "next_success_action_id": "end",
+      "next_err_action_id": "err_submit"
+    }
+  ],
+  "ui_schema": [
+    {
+      "id": "ui_1",
+      "component_type": "info_screen",
+      "title": "JLG Loan Application",
+      "message": "Welcome to the Joint Liability Group loan application process for Federal Bank.",
+      "buttons": ["Start"]
+    },
+    {
+      "id": "ui_2",
+      "component_type": "form",
+      "title": "Verify Mobile Number",
+      "fields": [
+        {
+          "name": "mobile",
+          "type": "text",
+          "label": "Mobile Number",
+          "required": true
+        },
+        { "name": "otp", "type": "text", "label": "OTP", "required": true }
+      ],
+      "buttons": ["Verify", "Resend OTP"]
+    },
+    {
+      "id": "ui_3",
+      "component_type": "form",
+      "title": "Customer Information",
+      "fields": [
+        {
+          "name": "full_name",
+          "type": "text",
+          "label": "Full Name",
+          "required": true
+        },
+        {
+          "name": "dob",
+          "type": "date",
+          "label": "Date of Birth",
+          "required": true
+        },
+        {
+          "name": "address",
+          "type": "textarea",
+          "label": "Full Address",
+          "required": true
+        }
+      ],
+      "buttons": ["Next"]
+    },
+    {
+      "id": "ui_4",
+      "component_type": "file_upload",
+      "title": "Upload KYC Documents",
+      "options": ["Aadhaar Card", "Voter ID"],
+      "buttons": ["Upload", "Next"]
+    },
+    {
+      "id": "ui_5",
+      "component_type": "list_builder",
+      "title": "Add Group Members",
+      "item_schema": { "name": "text", "mobile": "text" },
+      "buttons": ["Add Member", "Done"]
+    },
+    {
+      "id": "ui_6",
+      "component_type": "form",
+      "title": "Loan Details",
+      "fields": [
+        {
+          "name": "loan_amount",
+          "type": "number",
+          "label": "Loan Amount",
+          "required": true
+        },
+        {
+          "name": "tenure_months",
+          "type": "number",
+          "label": "Tenure (in months)",
+          "required": true
+        }
+      ],
+      "buttons": ["Next"]
+    },
+    {
+      "id": "ui_7",
+      "component_type": "summary_screen",
+      "title": "Review Application",
+      "buttons": ["Submit", "Edit"]
+    }
+  ],
+  "api_schema": [
+    {
+      "id": "api_1",
+      "endpoint": "/verify_otp",
+      "method": "POST",
+      "headers": { "Authorization": "Bearer {token}" },
+      "body": { "mobile": "{mobile}", "otp": "{otp}" }
+    },
+    {
+      "id": "api_2",
+      "endpoint": "/upload_document",
+      "method": "POST",
+      "headers": { "Authorization": "Bearer {token}" },
+      "body": { "file_type": "{file_type}", "file_content": "{file_content}" }
+    },
+    {
+      "id": "api_3",
+      "endpoint": "/submit_jlg_application",
+      "method": "POST",
+      "headers": { "Authorization": "Bearer {token}" },
+      "body": "{full_application_data}"
+    }
+  ]
+}
