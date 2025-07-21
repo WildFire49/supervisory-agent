@@ -99,23 +99,33 @@ def update_workflow_action_schema(bank: str, product: str, new_action_schema: di
     finally:
         db.close()
 
-def get_or_create_conversation(user_id: str, conversation_id_str: str) -> Conversation:
+def get_or_create_conversation(user_id: str, conversation_id_str: str = None) -> Conversation:
     session = SessionLocal()
     try:
-        conversation_id = uuid.UUID(conversation_id_str)
-        conversation = session.query(Conversation).filter_by(id=conversation_id).first()
-        if conversation:
-            return conversation
-        # If not found, create one with the client-provided UUID
-        conversation = Conversation(id=conversation_id, user_id=user_id)
-    except ValueError:
-        # If conversation_id_str is not a valid UUID, create a new one and let the DB generate the ID
-        conversation = Conversation(user_id=user_id)
+        if conversation_id_str is None:
+            # Create a new conversation with backend-generated UUID
+            print(f"Creating new conversation for user: {user_id}")
+            conversation = Conversation(user_id=user_id)
+        else:
+            try:
+                # Try to treat it as a UUID
+                conversation_id = uuid.UUID(conversation_id_str)
+                conversation = session.query(Conversation).filter_by(id=conversation_id).first()
+                if conversation:
+                    print(f"Found existing conversation by UUID: {conversation_id}")
+                    return conversation
+                # If not found, create one with the client-provided UUID
+                print(f"Creating conversation with provided UUID: {conversation_id}")
+                conversation = Conversation(id=conversation_id, user_id=user_id)
+            except ValueError:
+                # If not a valid UUID, create a new conversation (ignore the invalid string)
+                print(f"Invalid UUID '{conversation_id_str}', creating new conversation for user: {user_id}")
+                conversation = Conversation(user_id=user_id)
 
-    try:
         session.add(conversation)
         session.commit()
         session.refresh(conversation)
+        print(f"Successfully created/retrieved conversation: {conversation.id}")
         return conversation
     finally:
         session.close()
@@ -134,9 +144,13 @@ def add_message_to_conversation(conversation_id: uuid.UUID, sender: SenderType, 
         db.close()
 
 def get_conversation_history(conversation_id_str: str, limit: int = 10) -> list[ChatMessage]:
+    """Get chat history for a conversation. conversation_id_str must be a valid UUID."""
     db = SessionLocal()
     try:
+        print(f"DEBUG DB: Looking for conversation_id: {conversation_id_str}")
         conversation_id = uuid.UUID(conversation_id_str)
+        print(f"DEBUG DB: Converted to UUID: {conversation_id}")
+        
         history = (
             db.query(ChatMessage)
             .filter(ChatMessage.conversation_id == conversation_id)
@@ -144,8 +158,13 @@ def get_conversation_history(conversation_id_str: str, limit: int = 10) -> list[
             .limit(limit)
             .all()
         )
+        print(f"DEBUG DB: Found {len(history)} messages in database")
         return list(reversed(history))  # Return in chronological order
-    except (NoResultFound, ValueError):
+    except ValueError as e:
+        print(f"DEBUG DB: Invalid UUID format: {conversation_id_str} - {e}")
+        return []
+    except Exception as e:
+        print(f"DEBUG DB: Error getting conversation history: {e}")
         return []
     finally:
         db.close()

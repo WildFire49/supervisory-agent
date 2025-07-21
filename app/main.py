@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 import traceback
 import json
-from app.models.schemas import ChatRequest, ChatResponse
+from app.models.schemas import ChatRequest, ChatResponse, ConversationCreateRequest, ConversationCreateResponse
 from app.agents.supervisor import agent_executor
 from app.core.database import (
     get_or_create_conversation,
@@ -22,18 +22,22 @@ async def chat(request: ChatRequest):
     """
     Main chat endpoint that receives user requests and routes them to the supervisory agent.
     """
-    if not request.user_id or not request.conversation_id:
-        raise HTTPException(status_code=400, detail="user_id and conversation_id are required")
+    if not request.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
 
     try:
         # 1. Get or create the conversation object
         conversation = get_or_create_conversation(request.user_id, request.conversation_id)
+        actual_conversation_id = str(conversation.id)
 
         # 2. Save the user's message to the history
         add_message_to_conversation(conversation.id, SenderType.USER, request.message)
 
-        # 3. Fetch recent chat history
-        chat_history = get_conversation_history(request.conversation_id)
+        # 3. Fetch recent chat history (use the actual UUID, not the request conversation_id)
+        chat_history = get_conversation_history(actual_conversation_id)
+        print(f"DEBUG MAIN: Loaded {len(chat_history)} messages from database")
+        for i, msg in enumerate(chat_history):
+            print(f"DEBUG MAIN: History[{i}]: {msg.sender_type.value} - {msg.content[:50]}...")
 
         # 4. Prepare agent input, loading state from the conversation
         agent_input = {
@@ -47,6 +51,7 @@ async def chat(request: ChatRequest):
         }
 
         # 5. Asynchronously invoke the agent
+        print(f"DEBUG MAIN: Passing {len(agent_input.get('chat_history', []))} messages to agent")
         response_data = await agent_executor.ainvoke(agent_input)
 
         # 6. Save the AI's response to the history
@@ -71,10 +76,39 @@ async def chat(request: ChatRequest):
             db.close()
 
         print(f"--- FINAL RESPONSE ---\n{json.dumps(response_data.get('response'), indent=2)}\n----------------------")
-        return ChatResponse(response=response_data.get('response'))
+        return ChatResponse(
+            response=response_data.get('response'),
+            conversation_id=actual_conversation_id
+        )
 
     except Exception as e:
         print("--- AGENT EXCEPTION ---")
+        traceback.print_exc()
+        print("-----------------------")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/conversations", response_model=ConversationCreateResponse)
+async def create_conversation(request: ConversationCreateRequest):
+    """
+    Create a new conversation with a backend-generated UUID.
+    Frontend should use this UUID for all subsequent chat requests.
+    """
+    if not request.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    
+    try:
+        # Create a new conversation - pass None as conversation_id to generate new UUID
+        conversation = get_or_create_conversation(request.user_id, None)
+        
+        print(f"Created new conversation: {conversation.id} for user: {request.user_id}")
+        
+        return ConversationCreateResponse(
+            conversation_id=str(conversation.id),
+            user_id=request.user_id,
+            created_at=conversation.created_at
+        )
+    except Exception as e:
+        print("--- CONVERSATION CREATION EXCEPTION ---")
         traceback.print_exc()
         print("-----------------------")
         raise HTTPException(status_code=500, detail=str(e))
