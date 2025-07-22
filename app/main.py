@@ -1,12 +1,16 @@
 from fastapi import FastAPI, HTTPException
 import traceback
 import json
-from app.models.schemas import ChatRequest, ChatResponse, ConversationCreateRequest, ConversationCreateResponse
+from app.models.schemas import (
+    ChatRequest, ChatResponse, ConversationCreateRequest, ConversationCreateResponse,
+    ConversationListResponse, ChatHistoryResponse, ConversationInfo, ChatMessageResponse
+)
 from app.agents.supervisor import agent_executor
 from app.core.database import (
     get_or_create_conversation,
     add_message_to_conversation,
     get_conversation_history,
+    get_conversations_for_user,
     SenderType,
     SessionLocal
 )
@@ -111,6 +115,47 @@ async def create_conversation(request: ConversationCreateRequest):
         print("--- CONVERSATION CREATION EXCEPTION ---")
         traceback.print_exc()
         print("-----------------------")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/users/{user_id}/conversations", response_model=ConversationListResponse)
+async def list_user_conversations(user_id: str):
+    """
+    Retrieve all conversations for a specific user, ordered by most recent.
+    """
+    try:
+        conversations = get_conversations_for_user(user_id)
+        response_data = [
+            ConversationInfo(
+                id=str(conv.id),
+                user_id=conv.user_id,
+                created_at=conv.created_at,
+                updated_at=conv.updated_at
+            ) for conv in conversations
+        ]
+        return ConversationListResponse(conversations=response_data)
+    except Exception as e:
+        print("--- CONVERSATION LISTING EXCEPTION ---")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/conversations/{conversation_id}/history", response_model=ChatHistoryResponse)
+async def get_history(conversation_id: str):
+    """
+    Retrieve the chat history for a specific conversation.
+    """
+    try:
+        history = get_conversation_history(conversation_id, limit=1000)  # Fetch a large number of messages
+        response_data = [
+            ChatMessageResponse(
+                sender_type=msg.sender_type.value,
+                content=msg.content,
+                created_at=msg.created_at
+            ) for msg in history
+        ]
+        return ChatHistoryResponse(history=response_data)
+    except Exception as e:
+        print("--- HISTORY FETCHING EXCEPTION ---")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")

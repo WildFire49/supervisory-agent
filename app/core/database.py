@@ -143,6 +143,20 @@ def add_message_to_conversation(conversation_id: uuid.UUID, sender: SenderType, 
     finally:
         db.close()
 
+def get_conversations_for_user(user_id: str) -> list[Conversation]:
+    """Get all conversations for a specific user."""
+    db = SessionLocal()
+    try:
+        conversations = (
+            db.query(Conversation)
+            .filter(func.lower(Conversation.user_id) == func.lower(user_id))
+            .order_by(Conversation.updated_at.desc())
+            .all()
+        )
+        return conversations
+    finally:
+        db.close()
+
 def get_conversation_history(conversation_id_str: str, limit: int = 10) -> list[ChatMessage]:
     """Get chat history for a conversation. conversation_id_str must be a valid UUID."""
     db = SessionLocal()

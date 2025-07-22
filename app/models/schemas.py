@@ -20,3 +20,21 @@ class ConversationCreateResponse(BaseModel):
     conversation_id: str = Field(..., description="The backend-generated UUID for the conversation.")
     user_id: str = Field(..., description="The unique identifier for the user.")
     created_at: datetime = Field(..., description="When the conversation was created.")
+
+
+class ConversationInfo(BaseModel):
+    id: str = Field(..., description="The unique identifier for the conversation.")
+    user_id: str = Field(..., description="The unique identifier for the user.")
+    created_at: datetime = Field(..., description="The timestamp when the conversation was created.")
+    updated_at: datetime = Field(..., description="The timestamp when the conversation was last updated.")
+
+class ConversationListResponse(BaseModel):
+    conversations: list[ConversationInfo] = Field(..., description="A list of conversations for the user.")
+
+class ChatMessageResponse(BaseModel):
+    sender_type: str = Field(..., description="The sender of the message, either 'user' or 'ai'.")
+    content: str = Field(..., description="The content of the message.")
+    created_at: datetime = Field(..., description="The timestamp when the message was created.")
+
+class ChatHistoryResponse(BaseModel):
+    history: list[ChatMessageResponse] = Field(..., description="A list of messages in the conversation.")

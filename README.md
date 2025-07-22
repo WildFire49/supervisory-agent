@@ -1,76 +1,57 @@
 # Supervisory Agent & MCP Server
 
-This project implements a sophisticated supervisory agent that uses LangGraph to manage and execute complex, dynamic workflows. It communicates with a dedicated MCP (Model-Context-Protocol) server to leverage external tools and also integrates with other standalone services.
+This project implements a sophisticated supervisory agent that uses LangGraph to manage and execute complex, dynamic workflows. It communicates with a dedicated MCP (Model Context Protocol) server to leverage external tools and also integrates with other standalone services. The system is designed for scalability and dynamic adaptation, allowing the agent to discover and use new tools from the MCP server without requiring code changes.
 
-## Project Structure
+## Core Components and Logic
 
-- **`app/`**: Main application directory for the Supervisory Agent.
-  - `main.py`: FastAPI entry point with the `/chat` endpoint.
-  - `agents/`:
-    - `supervisor.py`: The main LangGraph-based supervisory agent.
-    - `mcp_client.py`: Client for the MCP server, built using the official `mcp-client` library.
-  - `clients/`:
-    - `external_services.py`: A dedicated client for non-MCP services.
-  - `core/`:
-    - `config.py`: Manages environment variables and settings.
-  - `workflows/`: JSON definitions for conversational workflows.
-- **`mcp_server.py`**: A standalone FastAPI and FastMCP server that exposes tools.
-- **`requirements.txt`**: Python dependencies.
-- **`.env`**: File for storing environment variables.
-- **`README.md`**: This file.
+The system is composed of two main applications: the **Supervisory Agent** and the **MCP Server**.
 
-## How It Works: Data Flow
+### 1. Supervisory Agent (`app/`)
 
-The system has two main applications: the **Supervisory Agent** and the **MCP Server**.
+The agent is the primary entry point for user requests and is responsible for orchestrating tasks.
 
-1.  **User Request**: A user sends a message (e.g., "What's the weather in London?") to the Supervisory Agent's `/chat` endpoint.
+#### Key Modules:
 
-2.  **Supervisor Agent (`supervisor.py`)**: The agent's router analyzes the user's intent and decides which tool to use. It knows about internal functions, tools from the MCP server, and external services.
+-   **`main.py`**: The FastAPI entry point that exposes the `/chat` and `/conversations` endpoints. It handles incoming user requests, manages conversation history, and invokes the supervisory agent.
 
-3.  **Client Routing**:
+-   **`agents/supervisor.py`**: This is the brain of the system, built with LangGraph. It defines a stateful graph that routes user queries to the appropriate node for execution.
+    -   **AgentState**: A `TypedDict` that maintains the state of the conversation, including user query, chat history, and intermediate results.
+    -   **Router Node**: The entry point of the graph. It uses an LLM to analyze the user's intent and decides which tool or workflow to execute. It dynamically constructs a prompt with a list of all available tools (internal, external, and from the MCP server).
+    -   **Execution Nodes**: The graph contains specialized nodes for different tasks:
+        -   `workflow_execution_node`: Executes predefined, step-by-step conversational workflows.
+        -   `mcp_tool_node` & `mcp_tool_direct_node`: Invoke tools on the MCP server via the `MCPClient`.
+        -   `dashboard_agent_node`, `credit_analysis_node`, `rule_saver_node`: Call external, non-MCP services via the `ExternalServicesClient`.
+        -   `workflow_modification_node`: Modifies existing workflows based on user instructions.
+        -   `general_qa_node`: Answers general questions using a RAG (Retrieval-Augmented Generation) pipeline with a ChromaDB vector store.
 
-    - If the required tool is on the MCP Server (like `get_weather`), the supervisor calls the `MCPClient`.
-    - If the tool is an external service (like `dashboard_agent`), it calls the `ExternalServicesClient`.
+-   **`agents/mcp_client.py`**: A custom HTTP client that communicates with the MCP server following MCP principles.
+    -   **Dynamic Tool Discovery**: On initialization, the client connects to the MCP server's `/openapi.json` endpoint to discover all available tools.
+    -   **Schema Parsing**: It parses the OpenAPI schema to understand each tool's path, HTTP method (GET/POST), and parameter requirements (including data types and whether they are required).
+    -   **Tool Invocation**: It constructs and sends the correct HTTP request to the MCP server to execute a tool, including handling API key authentication and formatting parameters for either query strings (GET) or a JSON body (POST).
+    -   **Caching**: Discovered tools are cached to improve performance, with a mechanism to refresh the cache if needed.
 
-4.  **MCP Client & Server**:
+-   **`clients/external_services.py`**: A dedicated client for handling API calls to external, non-MCP services like the dashboard agent, credit analysis, and rule saver. This ensures a clean separation of concerns.
 
-    - The `MCPClient` sends a request to the `mcp_server.py`.
-    - The server authenticates the request, executes the `get_weather` function (which in turn calls the OpenWeather API), and returns the result.
+-   **`core/config.py`**: Manages all configuration and secrets (like API keys and service URLs) using `pydantic-settings`. It loads these values from a `.env` file, ensuring that no sensitive information is hardcoded.
 
-5.  **Final Response**: The result travels back through the client to the supervisor, which formats a final answer and sends it to the user.
+-   **`core/database.py`**: Manages the PostgreSQL database connection using SQLAlchemy. It handles the creation and retrieval of conversation history and workflow schemas.
 
-## Setup and Running the Project
+### 2. MCP Server (`mcp_server.py`)
 
-### 1. Environment Setup
+A standalone server that exposes tools over an HTTP API, following MCP principles.
 
-- **Install Dependencies**:
-  ```bash
-  pip install -r requirements.txt
-  ```
-- **Create `.env` file**: Copy the required variables from `app/core/config.py` into a `.env` file and provide the necessary values (e.g., API keys).
+-   **Technology**: Built with `FastAPI` and `FastMCP`.
+-   **Tool Exposure**: Any function decorated with `@app.get(...)` or `@app.post(...)` is automatically exposed as an MCP tool.
+-   **Dynamic OpenAPI Schema**: The server automatically generates an `/openapi.json` schema that describes all available tools, their endpoints, parameters, and data types. This is the foundation for the client's dynamic discovery process.
+-   **Authentication**: It uses FastAPI's dependency injection system to protect endpoints with API key authentication.
 
-### 2. Running the Servers
+## Data Flow and Communication
 
-The agent and server must run in separate terminals.
-
-- **Terminal 1: Start the MCP Server**:
-
-  ```bash
-  python mcp_server.py
-  ```
-
-  This will run on `http://localhost:8001` by default.
-
-- **Terminal 2: Start the Supervisory Agent**:
-  ```bash
-  uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
-  ```
-  The agent will be available at `http://localhost:8000`.
-
-### 3. Test the Setup
-
-Send a request to the agent's chat endpoint:
-
-```bash
-curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"user_id": "test-user", "message": "What is the weather in London?"}'
-```
+1.  **Initialization**: When the Supervisory Agent starts, the `MCPClient` connects to the MCP Server, fetches the `/openapi.json` schema, and builds a local cache of available tools.
+2.  **User Request**: A user sends a message to the agent's `/chat` endpoint.
+3.  **Intent Routing**: The `supervisor` agent's router node analyzes the user's query and the list of available tools (from its internal list, external services, and the MCP client's cache) to decide which action to take.
+4.  **Tool Invocation**: 
+    - If an MCP tool is chosen, the `MCPClient` constructs the appropriate HTTP request (GET or POST) based on the cached tool definition and sends it to the MCP server.
+    - If an external service is chosen, the `ExternalServicesClient` makes the API call.
+5.  **Execution & Response**: The MCP Server or external service executes the request and returns a JSON response.
+6.  **Final Output**: The result is passed back to the `supervisor` agent, which formats a final response for the user.
