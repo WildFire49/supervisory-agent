@@ -31,17 +31,27 @@ Based on the user's query, decide which of the following tools to use.
 
 **FAILURE IS NOT ACCEPTABLE:** If you send an incomplete question, the API will fail. You MUST contextualize every dashboard_agent question.
 
+**MCP Tool Parameter Extraction Rules:**
+- **WEATHER QUERIES:** Extract location from questions like "weather in bangalore", "what's the weather like in Tokyo", etc.
+- **PARAMETER MAPPING:** For get_weather tool, extract location and units (metric/imperial)
+- **EXAMPLES:**
+  - "weather in bangalore" → {{"location": "bangalore", "units": "metric"}}
+  - "what's the weather like in New York?" → {{"location": "New York", "units": "metric"}}
+  - "temperature in London in Fahrenheit" → {{"location": "London", "units": "imperial"}}
+
 **Output Format:**
 Provide your routing decision in the following JSON format.
 
 ```json
 {{
-    "route": "<one of: credit_analysis, rule_saver, workflow_modification, workflow_execution, dashboard_agent, general_qa>",
+    "route": "<one of: credit_analysis, rule_saver, workflow_modification, workflow_execution, mcp_tool_call, dashboard_agent, general_qa, OR any MCP tool name>",
     "bank": "<bank_name extracted from query, if any>",
     "product": "<product_name extracted from query, if any>",
+    "mcp_tool_json": {{<the JSON payload for the mcp_tool_call, if any>}},
     "question": "<the user's full question for the dashboard_agent, if any>",
     "credit_metadata": {{<the JSON payload for the credit_analysis tool, if any>}},
-    "rule_data": {{<the JSON payload for the rule_saver tool, if any>}}
+    "rule_data": {{<the JSON payload for the rule_saver tool, if any>}},
+    "tool_parameters": {{<parameters for MCP tools - MUST extract from user query, e.g. location for weather>}}
 }}
 ```
 

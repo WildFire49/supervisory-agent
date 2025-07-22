@@ -29,16 +29,24 @@ class AgentState(TypedDict):
     question_for_dashboard: NotRequired[str]
     credit_metadata: NotRequired[dict]
     rule_data: NotRequired[dict]
+    mcp_tool_name: NotRequired[str]
+    mcp_tool_params: NotRequired[dict]
 
 # Initialize components
 llm = ChatOpenAI(model=settings.LLM_MODEL_NAME, temperature=0, api_key=settings.OPENAI_API_KEY)
 mcp_client = MCPClient()
 
+# Fetch available MCP tools at startup
+print("Fetching available MCP tools...")
+mcp_tools_data = mcp_client.get_available_tools()
+mcp_tools = mcp_tools_data.get('tools', [])
+print(f"Available MCP tools: {[tool.get('name', 'unknown') for tool in mcp_tools]}")
+
 # --- Graph Nodes ---
 
 def router_node(state: AgentState):
     """Determines the next step based on the user query."""
-    print("---ROUTER--- ")
+    print("---INTENT ROUTER--- ")
     
     # Format chat history for the prompt
     history = state.get('chat_history', [])
@@ -52,7 +60,7 @@ def router_node(state: AgentState):
     print(f"DEBUG: Formatted history for prompt:\n{formatted_history}\n--- END HISTORY ---")
 
     # Dynamically create the list of tools for the prompt
-    tool_descriptions = (
+    base_tools = (
         "- `credit_analysis`: Use to analyze a customer's credit based on their metadata.\n"
         "- `rule_saver`: Use to update or add new credit rules.\n"
         "- `workflow_modification`: Modifies an existing workflow based on user instructions.\n"
@@ -60,6 +68,17 @@ def router_node(state: AgentState):
         "- `dashboard_agent`: Use for any questions about statistics, reports, collections, disbursements, or performance of Field Officers or CECs.\n"
         "- `general_qa`: Answers general questions using a knowledge base."
     )
+    
+    # Add MCP tools dynamically
+    mcp_tool_descriptions = ""
+    for tool in mcp_tools:
+        tool_name = tool.get('name', 'unknown')
+        tool_desc = tool.get('description', f'MCP tool: {tool_name}')
+        mcp_tool_descriptions += f"- `{tool_name}`: {tool_desc}\n"
+    
+    tool_descriptions = base_tools
+    if mcp_tool_descriptions:
+        tool_descriptions += "\n" + mcp_tool_descriptions.rstrip()
 
     prompt = SUPERVISOR_ROUTER_PROMPT.format(
         user_query=state['user_query'],
@@ -98,6 +117,10 @@ def router_node(state: AgentState):
             state['credit_metadata'] = parsed_output.get('credit_metadata')
         elif route == 'rule_saver':
             state['rule_data'] = parsed_output.get('rule_data')
+        elif route in [tool.get('name') for tool in mcp_tools]:
+            # Handle MCP tool calls
+            state['mcp_tool_name'] = route
+            state['mcp_tool_params'] = parsed_output.get('tool_parameters', {})
 
     except json.JSONDecodeError:
         print("Error: LLM returned invalid JSON for routing. Defaulting to General QA.")
@@ -183,6 +206,20 @@ def rule_saver_node(state: AgentState):
         return state
     
     response = mcp_client.call_rule_saver(rule_data)
+    state['response'] = response
+    return state
+
+def mcp_tool_direct_node(state: AgentState):
+    print("---MCP TOOL DIRECT--- ")
+    tool_name = state.get('mcp_tool_name')
+    tool_params = state.get('mcp_tool_params', {})
+    
+    if not tool_name:
+        state['response'] = {"error": "Missing MCP tool name."}
+        return state
+    
+    print(f"Calling MCP tool: {tool_name} with params: {tool_params}")
+    response = mcp_client.call_mcp_tool(tool_name, tool_params)
     state['response'] = response
     return state
 
@@ -319,6 +356,7 @@ def create_graph():
     workflow.add_node("dashboard_agent", dashboard_agent_node)
     workflow.add_node("credit_analyzer", credit_analysis_node)
     workflow.add_node("rule_updater", rule_saver_node)
+    workflow.add_node("mcp_tool_direct", mcp_tool_direct_node)
 
     # Set entry point
     workflow.set_entry_point("router")
@@ -342,6 +380,8 @@ def create_graph():
             return 'rule_updater'
         elif decision == 'workflow_execution':
             return 'workflow_executor'
+        elif decision in [tool.get('name') for tool in mcp_tools]:
+            return 'mcp_tool_direct'
         else:
             return 'general_qa'
 
@@ -355,6 +395,7 @@ def create_graph():
             "dashboard_agent": "dashboard_agent",
             "credit_analyzer": "credit_analyzer",
             "rule_updater": "rule_updater",
+            "mcp_tool_direct": "mcp_tool_direct",
             "general_qa": "general_qa",
         }
     )
@@ -367,6 +408,7 @@ def create_graph():
     workflow.add_edge("dashboard_agent", END)
     workflow.add_edge("credit_analyzer", END)
     workflow.add_edge("rule_updater", END)
+    workflow.add_edge("mcp_tool_direct", END)
 
     # Compile the graph
     return workflow.compile()
