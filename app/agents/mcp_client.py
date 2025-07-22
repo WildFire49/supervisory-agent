@@ -1,6 +1,5 @@
-import requests
+import asyncio
 import json
-import os
 from typing import Dict, Any, List, Optional
 from app.core.config import settings
 from dotenv import load_dotenv
@@ -8,29 +7,122 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class MCPClient:
+    """MCP-compliant HTTP client for dynamic tool and resource discovery and execution."""
+    
     def __init__(self):
-        self.mcp_base_url = settings.MCP_SERVER_URL
-        self.mcp_headers = {
-            "Authorization": f"Bearer {settings.MCP_API_KEY}",
+        self.server_url = settings.MCP_SERVER_URL
+        self.api_key = settings.MCP_API_KEY
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         self._available_tools = None
+        self._available_resources = None
         self._tools_cache_valid = False
+        self._resources_cache_valid = False
         
-        # Test connection to MCP server on initialization
-        self._test_connection()
+        # Initialize connection and discover capabilities
+        self._initialize_connection()
 
-    def _test_connection(self):
-        """Test connection to MCP server and log status"""
+    def _initialize_connection(self):
+        """Initialize connection and test server availability."""
         try:
-            response = requests.get(f"{self.mcp_base_url}/health", timeout=5)
+            print(f"🔗 Connecting to MCP server at {self.server_url}")
+            
+            # Test connection with health check
+            import requests
+            response = requests.get(f"{self.server_url}/health", timeout=5)
             if response.status_code == 200:
-                print(f"✅ Successfully connected to MCP server at {self.mcp_base_url}")
+                print("✅ Successfully connected to MCP server")
+                # Discover capabilities on initialization
+                self._discover_capabilities()
             else:
                 print(f"⚠️ MCP server responded with status {response.status_code}")
-        except requests.exceptions.RequestException as e:
+                
+        except Exception as e:
             print(f"❌ Failed to connect to MCP server: {e}")
-            print(f"   Make sure the MCP server is running at {self.mcp_base_url}")
+            print(f"   Make sure the MCP server is running at {self.server_url}")
+
+    def _discover_capabilities(self):
+        """Discover available tools and resources from the MCP server via OpenAPI schema."""
+        try:
+            import requests
+            
+            # Get OpenAPI schema to discover tools
+            response = requests.get(f"{self.server_url}/openapi.json", timeout=10)
+            response.raise_for_status()
+            schema = response.json()
+            
+            # Parse tools from OpenAPI paths
+            tools = []
+            paths = schema.get("paths", {})
+            for path, methods in paths.items():
+                # Skip system endpoints
+                if path in ["/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc", "/health"]:
+                    continue
+                    
+                for method, details in methods.items():
+                    if details.get('deprecated'):
+                        continue
+                        
+                    tool_name = details.get("summary") or path.strip("/").replace("-", "_")
+                    tools.append({
+                        "name": tool_name,
+                        "description": details.get("description", ""),
+                        "path": path,
+                        "method": method.upper(),
+                        "parameters": self._extract_parameters_from_schema(details)
+                    })
+            
+            self._available_tools = tools
+            self._tools_cache_valid = True
+            
+            # For now, assume no resources (can be extended later)
+            self._available_resources = []
+            self._resources_cache_valid = True
+            
+            print(f"📋 Discovered {len(tools)} tools")
+            print(f"🔧 Available tools: {[tool['name'] for tool in tools]}")
+            
+        except Exception as e:
+            print(f"❌ Failed to discover server capabilities: {e}")
+            self._available_tools = []
+            self._available_resources = []
+    
+    def _extract_parameters_from_schema(self, endpoint_details: dict) -> dict:
+        """Extract parameter schema from OpenAPI endpoint details."""
+        parameters = {}
+        
+        # Extract from requestBody if it exists (for POST requests)
+        request_body = endpoint_details.get("requestBody", {})
+        if request_body:
+            content = request_body.get("content", {})
+            json_content = content.get("application/json", {})
+            schema = json_content.get("schema", {})
+            if schema:
+                parameters = schema
+        
+        # Extract from parameters (for GET requests)
+        params = endpoint_details.get("parameters", [])
+        if params:
+            properties = {}
+            required = []
+            for param in params:
+                param_name = param.get("name")
+                param_schema = param.get("schema", {})
+                if param_name:
+                    properties[param_name] = param_schema
+                    if param.get("required", False):
+                        required.append(param_name)
+            
+            if properties:
+                parameters = {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
+        
+        return parameters
 
     def call_tool(self, tool_call_json: str):
         """
@@ -52,102 +144,87 @@ class MCPClient:
         except Exception as e:
             return {"error": f"Failed to process tool call: {e}"}
 
-
-
-    def get_available_tools(self, force_refresh=False):
-        """Fetch available tools from the server's OpenAPI schema."""
-        if self._tools_cache_valid and not force_refresh:
-            return self._available_tools
-
-        try:
-            response = requests.get(f"{self.mcp_base_url}/openapi.json", timeout=10)
-            response.raise_for_status()
-            schema = response.json()
-            
-            tools = []
-            paths = schema.get("paths", {})
-            for path, methods in paths.items():
-                for method, details in methods.items():
-                    # Ignore FastAPI default endpoints
-                    if path in ["/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"] or details.get('deprecated'):
-                        continue
-                    
-                    tool_name = details.get("summary") or path.strip("/")
-                    tools.append({
-                        "name": tool_name,
-                        "path": path,
-                        "method": method.upper(),
-                        "description": details.get("description", ""),
-                        "parameters": details.get("parameters", [])
-                    })
-
-            self._available_tools = {"tools": tools}
-            self._tools_cache_valid = True
-            print(f"📋 Available MCP tools: {[tool['name'] for tool in tools]}")
-            return self._available_tools
-
-        except requests.exceptions.RequestException as e:
-            print(f"❌ Failed to fetch OpenAPI schema: {e}")
-            self._available_tools = {"tools": []}
-            self._tools_cache_valid = False
-            return self._available_tools
-    
     def call_mcp_tool(self, tool_name: str, parameters: dict):
-        """Call a specific MCP tool by dynamically building the request from the OpenAPI schema."""
+        """Call a specific MCP tool via HTTP following MCP principles."""
         print(f"🔧 Calling MCP tool: {tool_name} with parameters: {parameters}")
         
-        tool_schema = self.get_tool_schema(tool_name)
-        if not tool_schema:
-            return {"error": f"Tool '{tool_name}' not found or schema unavailable."}
-
+        # Refresh tools if cache is invalid
+        if not self._tools_cache_valid:
+            self._discover_capabilities()
+        
+        # Find the tool
+        tool = next((t for t in self._available_tools if t["name"] == tool_name), None)
+        if not tool:
+            return {"error": f"Tool '{tool_name}' not found on server"}
+        
         try:
-            url = f"{self.mcp_base_url}{tool_schema['path']}"
-            method = tool_schema['method']
-
+            import requests
+            
+            url = f"{self.server_url}{tool['path']}"
+            method = tool['method']
+            
+            # Make HTTP request based on method
             if method == 'GET':
-                response = requests.get(url, params=parameters, headers=self.mcp_headers, timeout=30)
+                response = requests.get(url, params=parameters, headers=self.headers, timeout=30)
             elif method == 'POST':
-                response = requests.post(url, json=parameters, headers=self.mcp_headers, timeout=30)
+                response = requests.post(url, json=parameters, headers=self.headers, timeout=30)
             else:
-                return {"error": f"Unsupported HTTP method '{method}' for tool '{tool_name}'."}
-
+                return {"error": f"Unsupported HTTP method '{method}' for tool '{tool_name}'"}
+            
             response.raise_for_status()
-            return response.json()
-
+            result = response.json()
+            
+            # Return in MCP-compatible format
+            return {"result": result}
+            
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
-                return {"error": f"Tool endpoint not found: {e.response.url}"}
+                return {"error": f"Tool endpoint not found: {url}"}
             elif e.response.status_code == 401:
                 return {"error": "Authentication failed - check MCP API key"}
             else:
-                error_details = e.response.json().get('detail', e.response.text)
+                try:
+                    error_details = e.response.json().get('detail', str(e))
+                except:
+                    error_details = str(e)
                 return {"error": f"HTTP error calling tool: {error_details}"}
-        except requests.exceptions.RequestException as e:
-            return {"error": f"Network error calling MCP tool: {e}"}
         except Exception as e:
-            return {"error": f"Unexpected error calling MCP tool: {e}"}
-    
-    def refresh_tools_cache(self):
-        """
-        Force refresh the tools cache from the MCP server.
-        """
-        print("🔄 Refreshing tools cache...")
+            return {"error": f"Failed to call MCP tool: {e}"}
+
+    def get_available_tools(self, force_refresh=False):
+        """Get available tools from the MCP server."""
+        if not self._tools_cache_valid or force_refresh:
+            self._discover_capabilities()
+        
+        return {"tools": self._available_tools or []}
+
+    def get_available_resources(self, force_refresh=False):
+        """Get available resources from the MCP server."""
+        if not self._resources_cache_valid or force_refresh:
+            self._discover_capabilities()
+        
+        return {"resources": self._available_resources or []}
+
+    def read_resource(self, uri: str):
+        """Read a specific resource from the MCP server."""
+        # For now, resources are not implemented in our FastMCP server
+        # This can be extended when resources are added
+        return {"error": "Resources not yet implemented in this MCP server"}
+
+    def refresh_capabilities(self):
+        """Force refresh the tools and resources cache from the MCP server."""
+        print("🔄 Refreshing MCP server capabilities...")
         self._tools_cache_valid = False
+        self._resources_cache_valid = False
+        self._discover_capabilities()
         return self.get_available_tools(force_refresh=True)
     
-    def get_tool_schema(self, tool_name: str) -> Optional[Dict]:
-        """
-        Get the schema for a specific tool.
-        """
-        tools_data = self.get_available_tools()
-        for tool in tools_data.get('tools', []):
-            if tool['name'] == tool_name:
-                return tool
-        return None
-    
     def list_tool_names(self) -> List[str]:
-        """
-        Get a list of available tool names.
-        """
+        """Get a list of available tool names."""
         tools_data = self.get_available_tools()
         return [tool['name'] for tool in tools_data.get('tools', [])]
+    
+    def list_resource_uris(self) -> List[str]:
+        """Get a list of available resource URIs."""
+        resources_data = self.get_available_resources()
+        return [resource['uri'] for resource in resources_data.get('resources', [])]
