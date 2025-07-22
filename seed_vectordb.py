@@ -1,17 +1,12 @@
 import os
 import chromadb
-import dotenv
 from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
-
-# Load environment variables from .env file
-dotenv.load_dotenv()
+from app.core.config import settings
 
 # --- Configuration ---
-CHROMA_HOST = '3.6.132.24'
-CHROMA_PORT = 8000
 COLLECTION_NAME = "jlg_docs"
 DOCUMENTS_DIR = "data/documents"
 CHUNK_SIZE = 1000
@@ -67,7 +62,7 @@ def main():
     embeddings = OpenAIEmbeddings(openai_api_key=api_key)
 
     # 5. Connect to ChromaDB and upload documents
-    print(f"Connecting to ChromaDB at {CHROMA_HOST}:{CHROMA_PORT} and seeding collection '{COLLECTION_NAME}'...")
+    print(f"Connecting to ChromaDB at {settings.CHROMA_HOST}:{settings.CHROMA_PORT} and seeding collection '{COLLECTION_NAME}'...")
     try:
         # The LangChain Chroma class handles connecting, creating the collection if it doesn't exist,
         # and adding the documents with their embeddings all in one step.
@@ -75,12 +70,12 @@ def main():
             documents=splits,
             embedding=embeddings,
             collection_name=COLLECTION_NAME,
-            client=chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+            client=chromadb.HttpClient(host=settings.CHROMA_HOST, port=settings.CHROMA_PORT)
         )
         print("\n--- Seeding Complete! ---")
         # Verify the number of documents in the collection
-        client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-        collection = client.get_collection(name=COLLECTION_NAME)
+        chroma_client = chromadb.HttpClient(host=settings.CHROMA_HOST, port=settings.CHROMA_PORT)
+        collection = chroma_client.get_collection(name=COLLECTION_NAME)
         print(f"Collection '{COLLECTION_NAME}' now contains {collection.count()} documents.")
 
     except Exception as e:

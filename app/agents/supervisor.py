@@ -286,7 +286,7 @@ def workflow_modification_node(state: AgentState):
 
 def get_retriever():
     """Initializes a ChromaDB retriever for RAG."""
-    client = chromadb.HttpClient(host='3.6.132.24', port=8000)
+    client = chromadb.HttpClient(host=settings.CHROMA_HOST, port=settings.CHROMA_PORT)
     embeddings = OpenAIEmbeddings(api_key=settings.OPENAI_API_KEY)
     vector_store = Chroma(
         client=client,
