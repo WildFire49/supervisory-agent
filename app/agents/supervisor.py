@@ -1,4 +1,5 @@
 import json
+from logging import Logger
 from typing import TypedDict, List, NotRequired
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain.chains.combine_documents import create_stuff_documents_chain
@@ -11,6 +12,7 @@ from langgraph.graph import StateGraph, END
 
 from app.core.config import settings
 from app.core.database import get_workflow_details, update_workflow_action_schema, ChatMessage
+from app.clients.external_services import ExternalServicesClient
 from .mcp_client import MCPClient
 from .prompts import SUPERVISOR_ROUTER_PROMPT, WORKFLOW_MODIFICATION_PROMPT
 
@@ -35,6 +37,7 @@ class AgentState(TypedDict):
 # Initialize components
 llm = ChatOpenAI(model=settings.LLM_MODEL_NAME, temperature=0, api_key=settings.OPENAI_API_KEY)
 mcp_client = MCPClient()
+external_services_client = ExternalServicesClient()
 
 # Fetch available MCP tools at startup
 print("Fetching available MCP tools...")
@@ -110,7 +113,25 @@ def router_node(state: AgentState):
             state['product_name'] = new_product
         
         if route == 'mcp_tool_call':
-             state['mcp_tool_json'] = parsed_output.get('mcp_tool_json')
+            tool_params = parsed_output.get('tool_parameters', {})
+            # Dynamically find the tool name based on the parameters provided by the LLM.
+            # This is a simple heuristic: find the first tool that has all the parameters from the LLM.
+            matched_tool_name = None
+            for tool in mcp_tools:
+                tool_props = tool.get('parameters', {}).get('properties', {})
+                if tool_props and all(param in tool_props for param in tool_params.keys()):
+                    matched_tool_name = tool['name']
+                    break
+
+            if matched_tool_name:
+                state['mcp_tool_json'] = {
+                    "tool_name": matched_tool_name,
+                    "parameters": tool_params
+                }
+            else:
+                # If we can't find a matching tool, it's an error state.
+                # For now, we'll just pass the raw JSON and let the next node handle it.
+                state['mcp_tool_json'] = parsed_output.get('mcp_tool_json', {})
         elif route == 'dashboard_agent':
             state['question_for_dashboard'] = parsed_output.get('question')
         elif route == 'credit_analysis':
@@ -118,7 +139,7 @@ def router_node(state: AgentState):
         elif route == 'rule_saver':
             state['rule_data'] = parsed_output.get('rule_data')
         elif route in [tool.get('name') for tool in mcp_tools]:
-            # Handle MCP tool calls
+            # This handles direct tool calls when the route itself is the tool name
             state['mcp_tool_name'] = route
             state['mcp_tool_params'] = parsed_output.get('tool_parameters', {})
 
@@ -167,6 +188,7 @@ def workflow_execution_node(state: AgentState):
 def mcp_tool_node(state: AgentState):
     print("---MCP TOOL CALL--- ")
     tool_call = state.get('mcp_tool_json')
+    print(state,'STATEEE')
     if not tool_call:
         state['response'] = {"error": "Missing tool call JSON for MCP."}
         return state
@@ -179,34 +201,32 @@ def dashboard_agent_node(state: AgentState):
     print("---DASHBOARD AGENT--- ")
     question = state.get('question_for_dashboard')
     if not question:
-        state['response'] = {"error": "Missing question for Dashboard Agent."}
+        state['response'] = {"error": "No question provided for the dashboard agent."}
         return state
-    
-    print(f"Dashboard agent question: {question}")
-    response = mcp_client.call_dashboard_agent(question)
-    state['response'] = response
+
+    result = external_services_client.call_dashboard_agent(question)
+    state['response'] = result
     return state
 
 def credit_analysis_node(state: AgentState):
     print("---CREDIT ANALYSIS--- ")
     metadata = state.get('credit_metadata')
     if not metadata:
-        state['response'] = {"error": "Missing metadata for credit analysis."}
+        state['response'] = {"error": "No metadata provided for credit analysis."}
         return state
-    
-    response = mcp_client.call_credit_analysis(metadata)
-    state['response'] = response
+    result = external_services_client.call_credit_analysis(metadata)
+    state['response'] = result
     return state
 
 def rule_saver_node(state: AgentState):
     print("---RULE SAVER--- ")
     rule_data = state.get('rule_data')
     if not rule_data:
-        state['response'] = {"error": "Missing rule data for rule saver."}
+        state['response'] = {"error": "No rule data provided to save."}
         return state
-    
-    response = mcp_client.call_rule_saver(rule_data)
-    state['response'] = response
+
+    result = external_services_client.call_rule_saver(rule_data)
+    state['response'] = result
     return state
 
 def mcp_tool_direct_node(state: AgentState):
