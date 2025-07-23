@@ -61,47 +61,47 @@ def get_weather(location: str, units: str = "metric") -> dict:
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch weather data: {e}")
 
-@app.post("/calculate_bmi", dependencies=[Depends(verify_api_key)])
-def calculate_bmi(weight: float, height: float, unit_system: str = "metric") -> dict:
-    """Calculate Body Mass Index (BMI)."""
-    if unit_system == "imperial":
-        weight_kg = weight * 0.453592
-        height_m = (height * 2.54) / 100
-    else:
-        weight_kg = weight
-        height_m = height / 100
+# @app.post("/calculate_bmi", dependencies=[Depends(verify_api_key)])
+# def calculate_bmi(weight: float, height: float, unit_system: str = "metric") -> dict:
+#     """Calculate Body Mass Index (BMI)."""
+#     if unit_system == "imperial":
+#         weight_kg = weight * 0.453592
+#         height_m = (height * 2.54) / 100
+#     else:
+#         weight_kg = weight
+#         height_m = height / 100
     
-    if height_m <= 0 or weight_kg <= 0:
-        raise HTTPException(status_code=400, detail="Weight and height must be positive")
+#     if height_m <= 0 or weight_kg <= 0:
+#         raise HTTPException(status_code=400, detail="Weight and height must be positive")
     
-    bmi = weight_kg / (height_m ** 2)
+#     bmi = weight_kg / (height_m ** 2)
     
-    if bmi < 18.5:
-        category = "Underweight"
-    elif bmi < 25:
-        category = "Normal weight"
-    elif bmi < 30:
-        category = "Overweight"
-    else:
-        category = "Obese"
+#     if bmi < 18.5:
+#         category = "Underweight"
+#     elif bmi < 25:
+#         category = "Normal weight"
+#     elif bmi < 30:
+#         category = "Overweight"
+#     else:
+#         category = "Obese"
         
-    return {"bmi": round(bmi, 2), "category": category, "weight_kg": round(weight_kg, 2), "height_m": round(height_m, 2)}
+#     return {"bmi": round(bmi, 2), "category": category, "weight_kg": round(weight_kg, 2), "height_m": round(height_m, 2)}
 
-@app.get("/get_random_quote", dependencies=[Depends(verify_api_key)])
-def get_random_quote() -> dict:
-    """Get a random inspirational quote."""
-    try:
-        response = requests.get("https://api.quotable.io/random", timeout=10)
-        response.raise_for_status()
-        data = response.json()
+# @app.get("/get_random_quote", dependencies=[Depends(verify_api_key)])
+# def get_random_quote() -> dict:
+#     """Get a random inspirational quote."""
+#     try:
+#         response = requests.get("https://api.quotable.io/random", timeout=10)
+#         response.raise_for_status()
+#         data = response.json()
         
-        return {
-            "quote": data["content"],
-            "author": data["author"],
-            "tags": data.get("tags", [])
-        }
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch quote: {e}")
+#         return {
+#             "quote": data["content"],
+#             "author": data["author"],
+#             "tags": data.get("tags", [])
+#         }
+#     except requests.exceptions.RequestException as e:
+#         raise HTTPException(status_code=500, detail=f"Failed to fetch quote: {e}")
 
 @app.get("/health")
 async def health_check():
