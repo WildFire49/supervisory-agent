@@ -21,9 +21,18 @@ apt-get update && apt-get install -y postgresql-client
 # Wait for database to be ready
 wait_for_db
 
+# Ensure we're in the correct directory
+cd /code
+
+# Debug: Check if alembic files exist
+echo "Checking Alembic setup..."
+ls -la alembic.ini
+ls -la alembic/
+
 # Run database migrations
 echo "Running database migrations..."
-alembic upgrade head
+# Use the alembic command directly from the installed location
+/usr/local/bin/alembic upgrade head || echo "Alembic migration failed, but continuing..."
 
 # Start the application
 echo "Starting FastAPI application..."

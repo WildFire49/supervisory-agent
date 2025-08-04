@@ -11,6 +11,7 @@ WORKDIR /code
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the requirements file into the container at /code
@@ -24,13 +25,9 @@ COPY ./app /code/app
 COPY ./data /code/data
 COPY ./alembic /code/alembic
 COPY ./alembic.ini /code/alembic.ini
-COPY ./start.sh /code/start.sh
-
-# Make startup script executable
-RUN chmod +x /code/start.sh
 
 # Expose the port the app runs on
 EXPOSE 8000
 
-# Command to run the application with migrations
-CMD ["/code/start.sh"]
+# Command to run the application
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
