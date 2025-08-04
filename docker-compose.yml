@@ -1,55 +1,77 @@
 version: "3.8"
 
 services:
+  # PostgreSQL Database
+  postgres-db:
+    image: postgres:15-alpine
+    container_name: supervisory-agent-postgres
+    environment:
+      - POSTGRES_USER=vaishakh
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=supervisory_agent
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vaishakh -d supervisory_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - app-network
+    restart: unless-stopped
+
   # Supervisory Agent Application
-  agent-app:
+  supervisory-agent:
     build:
       context: .
       dockerfile: Dockerfile.app
+    container_name: supervisory-agent-app
     ports:
       - "8000:8000"
     env_file:
       - ./.env
     environment:
-      # Override service URLs to use Docker network hostnames
-      - DATABASE_URL=postgresql://user:password@postgres-db:5432/agent_db
-      - MCP_SERVER_URL=http://mcp-server:8001
+      # Database connection
+      - DATABASE_URL=postgresql://vaishakh:postgres@postgres-db:5432/supervisory_agent
+      # External services from .env
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MCP_API_KEY=${MCP_API_KEY}
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - MCP_SERVER_URL=${MCP_SERVER_URL}
+      - DASHBOARD_AGENT_URL=${DASHBOARD_AGENT_URL}
+      - CREDIT_ANALYSIS_URL=${CREDIT_ANALYSIS_URL}
+      - RULE_SAVER_URL=${RULE_SAVER_URL}
+      - CHROMA_HOST=${CHROMA_HOST}
+      - CHROMA_PORT=${CHROMA_PORT}
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2}
+      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY}
+      - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT}
+      - LANGCHAIN_ENDPOINT=${LANGCHAIN_ENDPOINT}
+      - SENTRY_DSN=${SENTRY_DSN}
+      - ENVIRONMENT=${ENVIRONMENT}
+      - APP_VERSION=${APP_VERSION}
+      - DEBUG=${DEBUG}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+      - LANGFUSE_HOST=${LANGFUSE_HOST}
+      - LANGFUSE_ENABLED=${LANGFUSE_ENABLED}
     depends_on:
       postgres-db:
         condition: service_healthy
-      mcp-server:
-        condition: service_started
-    networks:
-      - app-network
-
-  # MCP Server
-  mcp-server:
-    build:
-      context: .
-      dockerfile: Dockerfile.mcp
-    ports:
-      - "8001:8001"
-    env_file:
-      - ./.env
-    networks:
-      - app-network
-
-  # PostgreSQL Database
-  postgres-db:
-    image: postgres:15-alpine
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_USER=user
-      - POSTGRES_PASSWORD=password
-      - POSTGRES_DB=agent_db
-    ports:
-      - "5432:5432"
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d agent_db"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     networks:
       - app-network
 
