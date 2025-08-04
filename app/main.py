@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import traceback
 import json
 from app.models.schemas import (
@@ -19,6 +20,15 @@ app = FastAPI(
     title="Supervisory Agent API",
     description="An API for a supervisory agent that can handle dynamic workflows.",
     version="1.0.0",
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
 )
 
 @app.post("/chat", response_model=ChatResponse)

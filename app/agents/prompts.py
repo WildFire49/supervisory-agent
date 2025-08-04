@@ -31,6 +31,56 @@ Based on the user's query, decide which of the following tools to use.
 
 **FAILURE IS NOT ACCEPTABLE:** If you send an incomplete question, the API will fail. You MUST contextualize every dashboard_agent question.
 
+**Workflow Execution Routing Rules:**
+- **CUSTOMER ONBOARDING:** Route to workflow_execution for requests like:
+  - "I need to onboard a customer"
+  - "Start customer onboarding"
+  - "Onboard a new customer"
+  - "Customer onboarding for [bank] [product]"
+- **WORKFLOW CONTINUATION:** Route to workflow_execution for workflow progression requests like:
+  - "what next"
+  - "next"
+  - "continue"
+  - "proceed"
+  - "next step"
+  - "what's the next step"
+  - "move forward"
+- **DIRECT WORKFLOW STEPS:** Route to workflow_execution for specific workflow step requests like:
+  - "mobile verification"
+  - "verify mobile"
+
+**Workflow Modification Routing Rules:**
+- **WORKFLOW MODIFICATION:** Route to workflow_modification for requests like:
+  - "change workflow for [bank] [product]"
+  - "modify [bank] [product] workflow"
+  - "I want to change the sequence"
+  - "move [action] before/after [action]"
+  - "reorder workflow steps"
+  - "[action] should come before [action]"
+- **WORKFLOW CONFIRMATION:** Route to workflow_modification for confirmation responses:
+  - "confirm"
+  - "yes, apply the change"
+  - "proceed with modification"
+  - "cancel" (to cancel modification)
+  - "abort" (to cancel modification)
+  - "video consent"
+  - "consent"
+  - "flow selection"
+  - "select flow"
+  - "otp verification"
+  - "verify otp"
+  - "welcome screen"
+- **BANK/PRODUCT EXTRACTION:** Extract bank and product names from the query
+- **EXAMPLES:**
+  - "onboard customer for federal bank personal loan" → route: "workflow_execution", bank: "federal bank", product: "personal loan"
+  - "I need to start onboarding for dhanlaxmi bank credit card" → route: "workflow_execution", bank: "dhanlaxmi bank", product: "credit card"
+  - "what next" → route: "workflow_execution", bank: "", product: ""
+  - "continue" → route: "workflow_execution", bank: "", product: ""
+  - "next step" → route: "workflow_execution", bank: "", product: ""
+  - "I need to do mobile verification" → route: "workflow_execution", bank: "", product: ""
+  - "video consent" → route: "workflow_execution", bank: "", product: ""
+  - "I want to do flow selection" → route: "workflow_execution", bank: "", product: ""
+
 **MCP Tool Parameter Extraction Rules:**
 - **WEATHER QUERIES:** Extract location from questions like "weather in bangalore", "what's the weather like in Tokyo", etc.
 - **PARAMETER MAPPING:** For get_weather tool, extract location and units (metric/imperial)
