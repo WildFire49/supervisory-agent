@@ -1,0 +1,328 @@
+# Enhanced Schema Context Template for Financial Services
+# Domain: Lending & Collection Management Database Schema
+# Version: 2.0
+# Last Updated: 2025-01-06
+
+## PRIMARY TABLES FOR COLLECTION OPERATIONS
+
+### 1. staging_dashboard.loan_emi_mapping (EMI Schedule - PRIMARY TABLE)
+**Purpose**: Core EMI schedule and collection tracking
+**Key Fields**:
+- `collection_details_id` (VARCHAR) - FK to collection_details.source_id
+- `collection_due_date` (DATE) - **PRIMARY date field for all time-based filtering**
+- `emi_amount` (DOUBLE PRECISION) - Monthly EMI amount due
+- `emi_collected` (DOUBLE PRECISION) - Amount collected for this EMI
+- `arrear_amount` (DOUBLE PRECISION) - Overdue amount from previous months
+- `emi_number` (INTEGER) - EMI sequence number
+- `loan_tenure` (INTEGER) - Total loan tenure in months
+
+**Business Logic**:
+- One record per EMI per loan
+- `collection_due_date` is the authoritative date for collection analysis
+- Collection percentage = `(emi_collected / emi_amount) * 100`
+- Outstanding = `emi_amount - emi_collected`
+
+**Critical Joins**:
+```sql
+-- Primary join to collection details
+JOIN staging_dashboard.collection_details cd 
+  ON cd.source_id = lem.collection_details_id
+```
+
+### 2. staging_dashboard.collection_details (Loan Prospect & Relationship)
+**Purpose**: Loan and borrower relationship details
+**Key Fields**:
+- `source_id` (VARCHAR) - Primary key, referenced by loan_emi_mapping
+- `field_officer_id` (VARCHAR) - FK to collection_user
+- `branch_manager_id` (VARCHAR) - FK to collection_user  
+- `customer_name` (VARCHAR) - Borrower name
+- `loan_amount` (DOUBLE PRECISION) - Principal loan amount
+- `disbursement_date` (TIMESTAMP) - Loan disbursement date
+- `dpd_days` (INTEGER) - Days past due (for SMA/NPA classification)
+- `current_tenure` (INTEGER) - Current active tenure
+- `loan_product` (VARCHAR) - Product type (JLG, MSME, etc.)
+- `group_name` (VARCHAR) - For group-based loans
+- `mobile_number` (VARCHAR) - Borrower contact
+
+**DPD Classification Logic**:
+```sql
+CASE 
+  WHEN dpd_days BETWEEN 0 AND 30 THEN 'Standard'
+  WHEN dpd_days BETWEEN 31 AND 90 THEN 'SMA-1'
+  WHEN dpd_days BETWEEN 91 AND 180 THEN 'SMA-2'
+  WHEN dpd_days > 180 THEN 'NPA'
+END AS loan_classification
+```
+
+**Critical Rule**: 
+- ❌ DO NOT use `source_created_at` for business date filtering
+- ✅ Use `disbursement_date` for loan origination analysis only
+
+### 3. staging_dashboard.collection_user (User Mapping Table)
+**Purpose**: Maps collection roles to employees
+**Key Fields**:
+- `source_id` (VARCHAR) - Primary key
+- `employee_id` (VARCHAR) - FK to employee.source_id
+- `user_type` (VARCHAR) - Role type (FO, BM, etc.)
+- `is_active` (BOOLEAN) - Active status
+
+**Join Pattern**:
+```sql
+-- Get employee details for collection users
+JOIN staging_dashboard.collection_user cu 
+  ON cu.source_id = cd.field_officer_id
+JOIN staging_dashboard.employee e 
+  ON e.source_id = cu.employee_id
+```
+
+### 4. staging_dashboard.employee (Employee Master)
+**Purpose**: Employee information and hierarchy
+**Key Fields**:
+- `source_id` (VARCHAR) - Primary key
+- `employee_name` (VARCHAR) - Full name
+- `employee_code` (VARCHAR) - Employee ID
+- `mobile_number` (VARCHAR) - Contact number
+- `office_branch_id` (VARCHAR) - FK to office_branches
+- `designation` (VARCHAR) - Job role
+- `is_active` (BOOLEAN) - Employment status
+
+**Hierarchy Join**:
+```sql
+-- Complete hierarchy: Collection -> User -> Employee -> Branch
+FROM staging_dashboard.collection_details cd
+JOIN staging_dashboard.collection_user cu ON cu.source_id = cd.field_officer_id
+JOIN staging_dashboard.employee e ON e.source_id = cu.employee_id
+JOIN staging_dashboard.office_branches ob ON ob.source_id = e.office_branch_id
+```
+
+### 5. staging_dashboard.office_branches (Branch & Region Data)
+**Purpose**: Organizational structure and locations
+**Key Fields**:
+- `source_id` (VARCHAR) - Primary key
+- `office_name` (VARCHAR) - Branch name (**use for location filtering**)
+- `office_code` (VARCHAR) - Branch code
+- `office_type` (VARCHAR) - Branch type
+- `region` (VARCHAR) - Regional classification
+- `state` (VARCHAR) - State location
+- `district` (VARCHAR) - District location
+
+**Location Filtering**:
+```sql
+-- Case-insensitive branch filtering
+WHERE ob.office_name ILIKE '%branch_name%'
+```
+
+**Critical Rule**: 
+- ❌ Avoid non-existent columns: `region_name`, `cec_name`, `name`
+- ✅ Use `office_name` for branch identification
+
+### 6. staging_dashboard.transactions (Payment Records)
+**Purpose**: Individual payment transactions
+**Key Fields**:
+- `source_id` (VARCHAR) - Primary key
+- `collection_details_id` (VARCHAR) - FK to collection_details
+- `amount_paid` (DOUBLE PRECISION) - Payment amount
+- `payment_date` (TIMESTAMP) - When payment was made
+- `status` (VARCHAR) - Transaction status (**must be 'success'**)
+- `payment_status` (VARCHAR) - full/partial payment indicator
+- `payment_mode` (VARCHAR) - Cash, online, etc.
+- `transaction_id` (VARCHAR) - External reference
+- `is_closure_or_renewal` (BOOLEAN) - Final payment flag
+
+**Transaction Validation**:
+```sql
+-- Only successful transactions
+WHERE t.status = 'success' 
+AND t.payment_status IN ('full', 'partial')
+```
+
+## SECONDARY TABLES (SUPPORTING DATA)
+
+### 7. staging_dashboard.bmtransactions (Branch Manager Deposits)
+**Purpose**: BM deposit records and reconciliation
+**Key Fields**:
+- `source_id` (VARCHAR) - Primary key
+- `amounttransfered` (DOUBLE PRECISION) - Deposit amount
+- `bm_name` (VARCHAR) - Branch manager name
+- `bmid` (VARCHAR) - Branch manager ID
+- `transaction_ids` (VARCHAR[]) - Array of grouped transaction IDs
+- `transactiondate` (VARCHAR) - Deposit date
+- `status` (VARCHAR) - Deposit status
+- `verified` (BOOLEAN) - Verification status
+
+**Array Join Pattern**:
+```sql
+-- Link BM deposits to individual transactions
+JOIN staging_dashboard.transactions t 
+  ON t.transaction_id = ANY(bmt.transaction_ids)
+```
+
+### 8. staging_dashboard.fo_deposits (Field Officer Deposits)
+**Purpose**: FO to BM deposit tracking
+**Key Fields**:
+- `source_id` (VARCHAR) - Primary key
+- `amount_deposited` (DOUBLE PRECISION) - FO deposit amount
+- `fo_name` (VARCHAR) - Field officer name
+- `fo_id` (VARCHAR) - Field officer ID
+- `bm_name` (VARCHAR) - Receiving branch manager
+- `deposit_date` (TIMESTAMP) - Deposit timestamp
+- `transaction_ids` (VARCHAR[]) - Grouped transaction references
+
+### 9. staging_dashboard.loan_closure (Closure & Renewal Tracking)
+**Purpose**: Loan lifecycle management
+**Key Fields**:
+- `source_id` (VARCHAR) - Primary key
+- `collection_details_id` (VARCHAR) - FK to collection_details
+- `is_loan_closed` (BOOLEAN) - Closure status
+- `is_loan_closure_initiated` (BOOLEAN) - Closure request status
+- `is_loan_renewal_intitiated` (BOOLEAN) - Renewal request status
+- `closure_date` (TIMESTAMP) - Actual closure date
+- `closure_amount` (DOUBLE PRECISION) - Final settlement amount
+
+## FORBIDDEN TABLES FOR COLLECTION QUERIES
+
+### 🚫 NEVER USE These Tables in Collection Context:
+- `staging_dashboard.users_fed` - Use collection_user → employee instead
+- `staging_dashboard.masters_cec_fed` - Legacy disbursement data
+- `staging_dashboard.loan_life_cycle_fed` - Disbursement lifecycle
+- `staging_dashboard.customer_life_cycle_fed` - Customer disbursement journey
+- `staging_dashboard.group_life_cycle_fed` - Group disbursement tracking
+- `staging_dashboard.customer_stage_lifecycle` - Stage-based disbursement
+- Any table ending with `_fed` - These are disbursement-focused
+
+## STANDARD JOIN PATTERNS
+
+### Pattern 1: Basic Collection Query
+```sql
+FROM staging_dashboard.loan_emi_mapping lem
+JOIN staging_dashboard.collection_details cd 
+  ON cd.source_id = lem.collection_details_id
+WHERE lem.collection_due_date >= '2024-01-01'
+```
+
+### Pattern 2: Collection with User Details
+```sql
+FROM staging_dashboard.loan_emi_mapping lem
+JOIN staging_dashboard.collection_details cd 
+  ON cd.source_id = lem.collection_details_id
+JOIN staging_dashboard.collection_user cu 
+  ON cu.source_id = cd.field_officer_id
+JOIN staging_dashboard.employee e 
+  ON e.source_id = cu.employee_id
+```
+
+### Pattern 3: Collection with Location Hierarchy
+```sql
+FROM staging_dashboard.loan_emi_mapping lem
+JOIN staging_dashboard.collection_details cd 
+  ON cd.source_id = lem.collection_details_id
+JOIN staging_dashboard.collection_user cu 
+  ON cu.source_id = cd.field_officer_id
+JOIN staging_dashboard.employee e 
+  ON e.source_id = cu.employee_id
+JOIN staging_dashboard.office_branches ob 
+  ON ob.source_id = e.office_branch_id
+```
+
+### Pattern 4: Collection with Transactions
+```sql
+FROM staging_dashboard.loan_emi_mapping lem
+JOIN staging_dashboard.collection_details cd 
+  ON cd.source_id = lem.collection_details_id
+LEFT JOIN staging_dashboard.transactions t 
+  ON t.collection_details_id = cd.source_id
+  AND t.status = 'success'
+```
+
+## COMMON AGGREGATION PATTERNS
+
+### Monthly Collection Summary:
+```sql
+SELECT 
+  DATE_TRUNC('month', lem.collection_due_date) AS collection_month,
+  SUM(lem.emi_collected) AS total_collected,
+  SUM(lem.emi_amount) AS total_due,
+  ROUND((SUM(lem.emi_collected) / SUM(lem.emi_amount) * 100)::numeric, 2) AS collection_rate,
+  COUNT(*) AS emi_count
+FROM staging_dashboard.loan_emi_mapping lem
+WHERE lem.collection_due_date >= CURRENT_DATE - INTERVAL '12 months'
+GROUP BY DATE_TRUNC('month', lem.collection_due_date)
+ORDER BY collection_month DESC;
+```
+
+### Field Officer Performance:
+```sql
+SELECT 
+  e.employee_name AS field_officer,
+  e.employee_code,
+  ob.office_name AS branch,
+  SUM(lem.emi_collected) AS total_collected,
+  SUM(lem.emi_amount) AS total_target,
+  ROUND((SUM(lem.emi_collected) / SUM(lem.emi_amount) * 100)::numeric, 2) AS achievement_rate
+FROM staging_dashboard.loan_emi_mapping lem
+JOIN staging_dashboard.collection_details cd ON cd.source_id = lem.collection_details_id
+JOIN staging_dashboard.collection_user cu ON cu.source_id = cd.field_officer_id
+JOIN staging_dashboard.employee e ON e.source_id = cu.employee_id
+JOIN staging_dashboard.office_branches ob ON ob.source_id = e.office_branch_id
+WHERE lem.collection_due_date BETWEEN '2024-01-01' AND '2024-12-31'
+GROUP BY e.employee_name, e.employee_code, ob.office_name
+ORDER BY achievement_rate DESC;
+```
+
+## DATA TYPE HANDLING RULES
+
+### Numeric Calculations:
+```sql
+-- Always cast to numeric before ROUND()
+ROUND((expression)::numeric, 2)
+
+-- Safe division with null handling
+CASE 
+  WHEN denominator = 0 THEN 0 
+  ELSE ROUND((numerator / denominator * 100)::numeric, 2) 
+END
+```
+
+### Date Handling:
+```sql
+-- Use collection_due_date for filtering
+WHERE lem.collection_due_date >= CURRENT_DATE - INTERVAL '30 days'
+
+-- Month/year extraction
+EXTRACT(MONTH FROM lem.collection_due_date) AS collection_month
+EXTRACT(YEAR FROM lem.collection_due_date) AS collection_year
+```
+
+### Array Handling:
+```sql
+-- Check if value exists in array
+WHERE 'transaction_id' = ANY(bmt.transaction_ids)
+
+-- Unnest array for joins
+FROM staging_dashboard.bmtransactions bmt
+CROSS JOIN UNNEST(bmt.transaction_ids) AS tid
+JOIN staging_dashboard.transactions t ON t.transaction_id = tid
+```
+
+## PERFORMANCE OPTIMIZATION HINTS
+
+### Indexing Strategy:
+- Primary filters: `collection_due_date`, `field_officer_id`, `branch_manager_id`
+- Secondary filters: `dpd_days`, `loan_product`, `status`
+
+### Query Optimization:
+1. **Always filter by date range first** (uses index)
+2. **Limit result sets** with appropriate WHERE clauses
+3. **Use EXISTS instead of IN** for large subqueries
+4. **Aggregate at the lowest level** before joining
+
+### Memory Management:
+```sql
+-- Efficient pagination
+LIMIT 1000 OFFSET 0
+
+-- Date range limitations
+WHERE lem.collection_due_date >= CURRENT_DATE - INTERVAL '2 years'
+```
+
+This schema context provides the complete foundation for generating accurate collection-focused SQL queries while avoiding disbursement context contamination.

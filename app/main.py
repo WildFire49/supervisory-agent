@@ -15,6 +15,12 @@ from app.core.database import (
     SenderType,
     SessionLocal
 )
+from app.api import configurator, business_rules, schema_metadata, context_template
+from app.api.configurator import router as configurator_router
+from app.api.business_rules import router as business_rules_router
+from app.api.context_template import router as context_template_router
+from app.api.schema_metadata import router as schema_metadata_router
+from app.api.automated_enum_mapping import router as enum_mapping_router
 
 app = FastAPI(
     title="Supervisory Agent API",
@@ -30,6 +36,13 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
 )
+
+# Include API routers
+app.include_router(configurator_router)
+app.include_router(business_rules_router)
+app.include_router(schema_metadata_router)
+app.include_router(context_template_router)
+app.include_router(enum_mapping_router)
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):

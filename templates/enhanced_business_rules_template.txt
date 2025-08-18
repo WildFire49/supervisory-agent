@@ -1,0 +1,224 @@
+# Enhanced Business Rules Template for Financial Services
+# Domain: Lending & Collection Management
+# Version: 2.0
+# Last Updated: 2025-01-06
+
+## CRITICAL RULE 1: Collection vs Disbursement Context Separation
+
+### 🔐 Collection Query Enforcement Rules
+**Applies when query contains**: `collection`, `emi collected`, `collected amount`, `due`, `overdue`, `payment received`
+
+#### ✅ ALLOWED Tables for Collection Queries:
+- `staging_dashboard.loan_emi_mapping` (Primary EMI schedule table)
+- `staging_dashboard.collection_details` (Loan prospect & relationship details)
+- `staging_dashboard.collection_user` (Collection user mapping)
+- `staging_dashboard.employee` (Employee master data)
+- `staging_dashboard.office_branches` (Branch and region data)
+- `staging_dashboard.transactions` (Payment transactions - filter by status='success')
+
+#### 🚫 STRICTLY FORBIDDEN Tables for Collection Queries:
+- ❌ ALL `*_fed` tables (e.g., `users_fed`, `masters_cec_fed`, `loan_life_cycle_fed`)
+- ❌ `staging_dashboard.customer_life_cycle_fed`
+- ❌ `staging_dashboard.group_life_cycle_fed`
+- ❌ `staging_dashboard.customer_stage_lifecycle`
+- ❌ Any disbursement-specific tables
+
+#### 🔄 Required Joins for Collection Context:
+```sql
+-- For user details in collection queries:
+JOIN collection_user cu ON cu.source_id = collection_details.field_officer_id
+JOIN employee e ON e.source_id = cu.employee_id
+-- NOT: users_fed (forbidden)
+```
+
+### 🛑 Date Filtering Rules for Collection Queries
+
+#### ✅ PRIMARY Date Field for Collection Filtering:
+- **ALWAYS USE**: `loan_emi_mapping.collection_due_date`
+- **Purpose**: EMI due dates, monthly/yearly collection analysis
+
+#### ❌ DO NOT USE for Time-based Filtering:
+- `collection_details.source_created_at` (record creation, not business date)
+- `transactions.source_created_at` (system timestamp, not payment date)
+
+#### 🔗 Required Join Pattern:
+```sql
+FROM staging_dashboard.collection_details cd
+JOIN staging_dashboard.loan_emi_mapping lem 
+  ON lem.collection_details_id = cd.source_id
+WHERE lem.collection_due_date >= '2024-01-01'  -- Use this for date filtering
+```
+
+## CRITICAL RULE 2: PostgreSQL ROUND Function Handling
+
+### 🧠 Double Precision Casting Rule
+**Problem**: PostgreSQL cannot directly round `double precision` values
+**Solution**: Cast to `numeric` before rounding
+
+#### ✅ CORRECT Syntax:
+```sql
+ROUND((<decimal_expression>)::numeric, 2)
+ROUND((emi_collected / emi_amount * 100)::numeric, 2) AS collection_percentage
+```
+
+#### ❌ INCORRECT Syntax:
+```sql
+ROUND(<decimal_expression>, 2)  -- Will cause error
+```
+
+## RULE 3: Amount Aggregation and Calculation Rules
+
+### 💰 Amount Field Usage:
+- **Collection Amount**: Use `loan_emi_mapping.emi_collected`
+- **Due Amount**: Use `loan_emi_mapping.emi_amount`
+- **Overdue Amount**: Use `loan_emi_mapping.arrear_amount`
+- **Payment Amount**: Use `transactions.amount_paid` (with status='success')
+
+### 📊 Aggregation Patterns:
+```sql
+-- Total collected amount
+SUM(lem.emi_collected) AS total_collected
+
+-- Collection percentage
+ROUND((SUM(lem.emi_collected) / SUM(lem.emi_amount) * 100)::numeric, 2) AS collection_rate
+
+-- Outstanding amount
+SUM(lem.emi_amount - lem.emi_collected) AS outstanding_amount
+```
+
+## RULE 4: DPD (Days Past Due) Classification
+
+### 📈 SMA/NPA Bucket Rules:
+```sql
+CASE 
+  WHEN cd.dpd_days BETWEEN 0 AND 30 THEN 'Standard'
+  WHEN cd.dpd_days BETWEEN 31 AND 90 THEN 'SMA-1'
+  WHEN cd.dpd_days BETWEEN 91 AND 180 THEN 'SMA-2'
+  WHEN cd.dpd_days > 180 THEN 'NPA'
+END AS loan_classification
+```
+
+## RULE 5: Regional and Branch Hierarchy
+
+### 🏢 Proper Join Pattern for Location Data:
+```sql
+FROM staging_dashboard.collection_details cd
+JOIN staging_dashboard.collection_user cu ON cu.source_id = cd.field_officer_id
+JOIN staging_dashboard.employee e ON e.source_id = cu.employee_id
+JOIN staging_dashboard.office_branches ob ON ob.source_id = e.office_branch_id
+```
+
+### 🔍 Location Filtering:
+- Use `ob.office_name` for branch names
+- Use `ILIKE` for case-insensitive matching: `ob.office_name ILIKE '%branch_name%'`
+- Avoid non-existent columns like `region_name`, `cec_name`
+
+## RULE 6: Transaction Status and Payment Validation
+
+### ✅ Valid Transaction Filtering:
+```sql
+WHERE t.status = 'success'  -- Only successful transactions
+AND t.payment_status IN ('full', 'partial')  -- Valid payment types
+```
+
+### 🔄 Transaction to EMI Mapping:
+```sql
+-- Link transactions to EMI records
+JOIN staging_dashboard.loan_emi_mapping lem 
+  ON lem.collection_details_id = t.collection_details_id
+  AND lem.collection_due_date = t.payment_date::date
+```
+
+## RULE 7: Query Intent Recognition Patterns
+
+### 🎯 Collection Intent Keywords:
+- **Amount Queries**: "how much collected", "collection amount", "payment received"
+- **Due Queries**: "overdue", "pending", "outstanding", "arrears"
+- **Performance Queries**: "collection rate", "recovery percentage", "target achievement"
+- **Timeline Queries**: "today", "this month", "last month", "quarterly"
+
+### 🔍 Response Patterns:
+- **Amount Questions**: Always use SUM() aggregation
+- **Percentage Questions**: Always cast to numeric before ROUND()
+- **Date-based Questions**: Always filter by `collection_due_date`
+- **Performance Questions**: Include collection rate calculations
+
+## RULE 8: Data Quality and Validation
+
+### 🛡️ Mandatory Validations:
+```sql
+-- Exclude invalid records
+WHERE cd.loan_amount > 0
+AND cd.disbursement_date IS NOT NULL
+AND lem.emi_amount > 0
+```
+
+### 🔍 Common Pitfalls to Avoid:
+1. **Never mix collection and disbursement tables**
+2. **Always validate transaction status before aggregation**
+3. **Use proper date fields for time-based filtering**
+4. **Cast numeric calculations before rounding**
+5. **Join through proper hierarchy for location data**
+
+## RULE 9: Performance Optimization
+
+### ⚡ Indexing Hints:
+- Filter by `collection_due_date` first (indexed)
+- Use `field_officer_id` and `branch_manager_id` for user-specific queries
+- Limit results with appropriate date ranges
+
+### 📊 Aggregation Best Practices:
+```sql
+-- Efficient monthly aggregation
+SELECT 
+  DATE_TRUNC('month', lem.collection_due_date) AS collection_month,
+  SUM(lem.emi_collected) AS monthly_collection,
+  COUNT(*) AS emi_count
+FROM staging_dashboard.loan_emi_mapping lem
+WHERE lem.collection_due_date >= CURRENT_DATE - INTERVAL '12 months'
+GROUP BY DATE_TRUNC('month', lem.collection_due_date)
+ORDER BY collection_month DESC;
+```
+
+## RULE 10: Error Prevention Checklist
+
+### ✅ Before Generating SQL:
+1. **Context Check**: Is this a collection or disbursement query?
+2. **Table Validation**: Are all tables from the allowed list?
+3. **Join Validation**: Are joins following the proper hierarchy?
+4. **Date Field Check**: Using `collection_due_date` for filtering?
+5. **Numeric Casting**: All ROUND() functions properly cast?
+6. **Status Filtering**: Transaction status = 'success'?
+7. **Amount Fields**: Using correct amount columns?
+
+### 🚨 Red Flags:
+- Any `*_fed` table in collection context
+- `source_created_at` used for business date filtering
+- ROUND() without numeric casting
+- Missing transaction status filtering
+- Non-existent column references
+
+
+## AUTOMATED ENUM MAPPING RULES
+# Generated automatically by AutomatedEnumMappingGenerator
+# Generated at: 2025-08-11T14:39:46.088521
+
+
+### 🚨 CRITICAL Automated Enum Validation Rules:
+1. **Case Sensitivity**: All enum values MUST match exactly as stored in database
+2. **Exact Match**: Never use LIKE or partial matching for enum values  
+3. **Multi-Match Logic**: When user term could map to multiple enums, use OR conditions
+4. **Fuzzy Matching**: Apply intelligent mapping for common variations and synonyms
+5. **Validation**: Always validate enum exists before using in WHERE clause
+6. **Auto-Generated**: These rules were generated automatically - verify before production use
+
+### 📝 Example Auto-Generated Corrected Queries:
+```sql
+-- ❌ WRONG: User input taken literally
+SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
+WHERE level = 'bank account details';
+
+-- ✅ CORRECT: Apply automated enum mapping
+SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
+WHERE level = 'BANK_ACCOUNT_DETAILS';
+```

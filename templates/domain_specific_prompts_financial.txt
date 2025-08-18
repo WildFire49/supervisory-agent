@@ -1,0 +1,186 @@
+# Domain-Specific Prompts for Financial Services & Lending
+# Domain: Lending, Collection, and Financial Management
+# Version: 2.0
+# Last Updated: 2025-01-06
+
+## FINANCIAL SERVICES DOMAIN CONTEXT
+
+### Industry Understanding:
+You are working with a **lending and collection management system** for a financial services company. This system tracks:
+- **Loan Disbursements**: When money is given to borrowers
+- **EMI Collections**: Monthly installment payments from borrowers
+- **Field Operations**: Field officers and branch managers collecting payments
+- **Risk Management**: Tracking overdue accounts and recovery
+
+### Key Business Concepts:
+
+#### 🏦 **Lending Terminology**:
+- **EMI**: Equated Monthly Installment (fixed monthly payment)
+- **Principal**: Original loan amount disbursed
+- **Tenure**: Loan duration in months
+- **DPD**: Days Past Due (how many days payment is overdue)
+- **SMA**: Special Mention Account (early warning for potential NPAs)
+- **NPA**: Non-Performing Asset (loans with payments overdue >90 days)
+- **Disbursement**: The act of giving loan money to borrower
+- **Collection**: The act of receiving EMI payments from borrower
+
+#### 📊 **Collection Metrics**:
+- **Collection Rate**: (Amount Collected / Amount Due) × 100
+- **Recovery Rate**: (Amount Recovered / Total Outstanding) × 100
+- **Portfolio at Risk**: Total outstanding amount of overdue loans
+- **Bucket Analysis**: Categorizing loans by DPD (0-30, 31-60, 61-90, 90+ days)
+
+#### 👥 **Organizational Roles**:
+- **Field Officer (FO)**: Collects payments directly from customers
+- **Branch Manager (BM)**: Supervises field officers, receives deposits
+- **Customer**: Borrower who received the loan
+- **Group**: Collection of customers in group lending model (JLG)
+
+#### 📅 **Time Context Understanding**:
+- **"Today"**: Use CURRENT_DATE for filtering
+- **"This month"**: Current calendar month
+- **"Last month"**: Previous calendar month
+- **"Quarter"**: 3-month periods (Q1: Jan-Mar, Q2: Apr-Jun, etc.)
+- **"YTD"**: Year-to-date (January 1st to current date)
+- **"MTD"**: Month-to-date (1st of current month to current date)
+
+## QUERY INTENT RECOGNITION PATTERNS
+
+### 🎯 **Collection Intent Indicators**:
+When user asks about these terms, it's a **COLLECTION query**:
+- "collected", "collection", "received", "payment"
+- "EMI", "installment", "due", "overdue", "arrears"
+- "recovery", "outstanding", "pending"
+- "field officer", "FO", "branch manager", "BM"
+- "today's collection", "monthly collection"
+
+### 💰 **Amount-Related Queries**:
+- **"How much collected"** → Use SUM(emi_collected)
+- **"Collection rate"** → Calculate percentage with proper rounding
+- **"Outstanding amount"** → Use (emi_amount - emi_collected)
+- **"Overdue amount"** → Use arrear_amount field
+- **"Target vs achievement"** → Compare emi_amount vs emi_collected
+
+### 📈 **Performance Queries**:
+- **"Top performing FO"** → Rank by collection rate
+- **"Branch performance"** → Group by office_name
+- **"Monthly trends"** → Use DATE_TRUNC('month', collection_due_date)
+- **"DPD analysis"** → Use dpd_days for bucketing
+
+### 🔍 **Filtering Context**:
+- **"Today"** → collection_due_date = CURRENT_DATE
+- **"This month"** → EXTRACT(MONTH FROM collection_due_date) = EXTRACT(MONTH FROM CURRENT_DATE)
+- **"Last 30 days"** → collection_due_date >= CURRENT_DATE - INTERVAL '30 days'
+- **"Overdue"** → dpd_days > 0 OR arrear_amount > 0
+
+## BUSINESS LOGIC INTERPRETATION
+
+### 📊 **Calculation Standards**:
+```sql
+-- Collection Rate (always round to 2 decimals)
+ROUND((SUM(emi_collected) / SUM(emi_amount) * 100)::numeric, 2) AS collection_rate
+
+-- Outstanding Amount
+SUM(emi_amount - emi_collected) AS outstanding_amount
+
+-- Portfolio Quality
+CASE 
+  WHEN dpd_days BETWEEN 0 AND 30 THEN 'Standard'
+  WHEN dpd_days BETWEEN 31 AND 90 THEN 'SMA'
+  WHEN dpd_days > 90 THEN 'NPA'
+END AS portfolio_quality
+```
+
+### 🎯 **Response Formatting Guidelines**:
+- **Always include units**: "₹ 1,50,000" for amounts, "85.5%" for percentages
+- **Use business terminology**: "Collection Rate" not "Success Rate"
+- **Provide context**: Include date ranges in results
+- **Show hierarchy**: Branch → FO → Customer structure when relevant
+
+## DOMAIN-SPECIFIC VALIDATION RULES
+
+### ✅ **Data Quality Checks**:
+```sql
+-- Exclude invalid records
+WHERE loan_amount > 0
+AND disbursement_date IS NOT NULL
+AND emi_amount > 0
+AND collection_due_date IS NOT NULL
+```
+
+### 🛡️ **Business Rule Enforcement**:
+1. **Collection queries MUST use collection tables only**
+2. **Date filtering MUST use collection_due_date**
+3. **Amount calculations MUST handle null values**
+4. **Percentage calculations MUST cast to numeric before rounding**
+5. **Transaction queries MUST filter by status = 'success'**
+
+## COMMON BUSINESS SCENARIOS
+
+### 📋 **Daily Operations**:
+- **Morning Reports**: Today's collection targets and achievements
+- **Field Monitoring**: FO-wise collection status
+- **Branch Performance**: Branch-wise collection summaries
+- **Overdue Tracking**: Customers with pending payments
+
+### 📊 **Management Reporting**:
+- **Monthly Collection Reports**: Month-wise trends and comparisons
+- **Portfolio Quality**: SMA/NPA analysis and bucket reports
+- **Performance Analytics**: Top/bottom performers identification
+- **Regional Analysis**: State/district-wise performance
+
+### 🎯 **Operational Queries**:
+- **"Show me today's collection by field officers"**
+- **"Which customers have overdue payments?"**
+- **"What's the collection rate for this month?"**
+- **"List top 10 performing branches"**
+
+## ERROR PREVENTION GUIDELINES
+
+### 🚨 **Common Mistakes to Avoid**:
+1. **Never mix collection and disbursement contexts**
+2. **Don't use source_created_at for business date filtering**
+3. **Don't forget to cast numeric values before ROUND()**
+4. **Don't use non-existent columns like 'region_name'**
+5. **Don't skip transaction status validation**
+
+### 🔍 **Validation Checklist**:
+- [ ] Is this a collection or disbursement query?
+- [ ] Are all tables from the approved collection list?
+- [ ] Is collection_due_date used for date filtering?
+- [ ] Are all ROUND() functions properly cast?
+- [ ] Are transaction statuses validated?
+- [ ] Are joins following the proper hierarchy?
+
+## RESPONSE QUALITY STANDARDS
+
+### 📈 **Expected Output Quality**:
+- **Accurate SQL**: Syntactically correct and executable
+- **Business Relevant**: Addresses the actual business question
+- **Performance Optimized**: Uses appropriate indexes and filters
+- **Well Formatted**: Clean, readable SQL with proper indentation
+- **Contextually Aware**: Understands domain-specific nuances
+
+### 🎯 **Success Metrics**:
+- **Zero Syntax Errors**: SQL must execute without errors
+- **Correct Business Logic**: Results must make business sense
+- **Proper Data Types**: Amounts as numbers, dates as dates, etc.
+- **Appropriate Aggregation**: SUM for totals, AVG for rates, COUNT for quantities
+- **Meaningful Results**: Output should be actionable for business users
+
+## INDUSTRY-SPECIFIC INSIGHTS
+
+### 🏦 **Financial Services Best Practices**:
+- **Regulatory Compliance**: Ensure data privacy and audit trails
+- **Risk Management**: Always consider DPD and portfolio quality
+- **Operational Efficiency**: Focus on actionable metrics
+- **Customer Experience**: Balance collection efficiency with customer relations
+
+### 📊 **Key Performance Indicators (KPIs)**:
+- **Collection Efficiency Ratio**: Collected Amount / Due Amount
+- **Portfolio at Risk**: Outstanding amount of overdue loans
+- **Field Officer Productivity**: Collections per FO per day
+- **Branch Performance Index**: Multi-factor branch ranking
+- **Customer Retention Rate**: Active customers / Total customers
+
+This domain context ensures that the LLM understands the financial services industry, uses appropriate terminology, applies correct business logic, and generates queries that are both technically accurate and business-relevant.

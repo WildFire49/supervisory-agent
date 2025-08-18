@@ -1,0 +1,14 @@
+# Phoenix LLM Tracing and Observability
+arize-phoenix>=4.0.0
+openinference-instrumentation-openai>=0.1.0
+openinference-instrumentation-langchain>=0.1.0
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-exporter-otlp>=1.20.0
+opentelemetry-instrumentation>=0.41b0
+
+# Additional dependencies for enhanced tracing
+pandas>=1.5.0
+numpy>=1.24.0
+plotly>=5.15.0
+streamlit>=1.28.0  # For the playground UI

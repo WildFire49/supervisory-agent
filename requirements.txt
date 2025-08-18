@@ -15,3 +15,13 @@ langchain-community
 langchain-chroma
 docx2txt
 fastmcp
+# Configurator dependencies
+pymongo
+pymysql
+cx_oracle
+pyodbc
+pandas
+structlog
+prometheus-client
+sentry-sdk
+langfuse

@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     RULE_SAVER_URL: str
     CHROMA_HOST: str
     CHROMA_PORT: int
+    ENABLE_LLM_COLUMN_ENRICHMENT: bool = True
 
     class Config:
         env_file = ".env"

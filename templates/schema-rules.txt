@@ -1,0 +1,664 @@
+CREATE TABLE staging_dashboard.bmtransactions ( -- Branch Manager Deposit Records
+    source_id VARCHAR(255) NOT NULL,                       -- Unique transaction record ID
+    amounttransfered DOUBLE PRECISION,                     -- Total amount deposited by the branch manager
+    bankname VARCHAR(255),                                 -- Name of bank where deposited
+    bm_name VARCHAR(255),                                  -- Branch manager's full name
+    bmid VARCHAR(255),                                     -- Branch manager's internal ID
+    description VARCHAR(255),                              -- Description or remarks for the transaction
+    imageurl VARCHAR(255),                                 -- URL to the deposit slip image
+    product_name VARCHAR(255),                             -- Loan product (e.g. JLG, MSME)
+    status VARCHAR(255),                                   -- Status of deposit (e.g. success, failed)
+    transaction_ids VARCHAR[],                             -- List of transaction IDs grouped in this deposit
+    transactiondate VARCHAR(255),                          -- Date of the transaction (preferably use TIMESTAMP)
+    triggeredby VARCHAR(255),                              -- User or system who triggered the deposit action
+    verified BOOLEAN,                                      -- Whether the deposit was verified
+    bm_transaction_id VARCHAR(255),                        -- External transaction ID (e.g. UTR, ref no.)
+    verified_at VARCHAR(255),                              -- Timestamp when deposit was verified
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE,      -- Record created timestamp
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,      -- Record updated timestamp
+    CONSTRAINT bmtransactions_pkey PRIMARY KEY (source_id)
+);
+# Business Logic:
+- Captures grouped deposit records performed by branch managers (BM).
+- Each record may include multiple fo transactions via `transaction_ids[]`.
+- Status flow: recorded → verified → posted to bank.
+- This table enables audit trails and reconciliation with FO deposits and customer transactions.
+
+# Field Highlights:
+- Use `transaction_ids` to join with `transactions.transaction_id` (one-to-many).
+- `verified` + `verified_at` helps determine reconciliation and compliance check.
+
+# Suggestions:
+- You may consider casting `transactiondate` and `verified_at` to `TIMESTAMP` for better query compatibility.
+/*
+1 rows from bmtransactions table:
+source_id	amounttransfered	bankname	bm_name	bmid	description	imageurl	product_name	status	transaction_ids	transactiondate	triggeredby	verified	bm_transaction_id	verified_at	source_created_at	source_updated_at
+495af3ea-1762-4934-8572-9f082eee68b5	96441		SZS0153	22108a96-d242-4908-9504-2aa2a0076116	credited		null	success	{d12c6942-8a87-440a-9360-1d9383995202}	1/2/2024 5:50	admin	TRUE			50:39.1	08:16.1
+*/
+ 
+CREATE TABLE staging_dashboard.collection_details ( -- Loan Prospect & Relationship Details
+    source_id VARCHAR(255) NOT NULL,                          -- Unique ID for each loan prospect record
+    bank_name VARCHAR(255),                                   -- Bank to which the loan is mapped
+	field_officer_id VARCHAR(255),                            -- FK to collection_user for FO
+    branch_manager_id VARCHAR(255),                           -- FK to collection_user for BM
+	branch_manager_mobile_number VARCHAR(255),                -- Mobile number of branch manager handling this prospect
+    branch_manager_name VARCHAR(255),                         -- Name of the branch manager
+    current_tenure INTEGER,                                   -- Current active tenure of the loan (in months)
+    delivery_partner_name VARCHAR(255),                       -- Name of BC (business correspondent)
+    disbursement_date TIMESTAMP(6) WITHOUT TIME ZONE,         -- Loan disbursement date
+    dpd_days INTEGER,                                         -- Days past due
+    field_officer_mobile_number VARCHAR(255),                 -- FO's mobile number
+    field_officer_name VARCHAR(255),                          -- FO's name managing this account
+    group_name VARCHAR(255),                                  -- Group name (if JLG or group lending)
+    is_group_head BOOLEAN,                                    -- Whether the person is group leader
+    latitude VARCHAR(255),                                    -- Latitude of customer location
+    loan_account_number VARCHAR(255),                         -- Loan account number (visible to customer)
+    loan_tenure BYTEA,                                        -- Original loan tenure (in months or encoded)
+    location VARCHAR(255),                                    -- Customer location (city/town)
+    longitude VARCHAR(255),                                   -- Longitude of customer location
+    product_name VARCHAR(255),                                -- Loan product (e.g., JLG, Agri)
+    prospect_address VARCHAR(255),                            -- Full address of prospect
+    prospect_image_url VARCHAR(255),                          -- Image of customer (KYC or captured during visit)
+    prospect_name VARCHAR(255),                               -- Name of the prospect
+    prospect_pincode INTEGER,                                 -- Prospect's pincode
+    prospects_mobile_number VARCHAR(255),                     -- Prospect's mobile number
+    rate_of_interest DOUBLE PRECISION,                        -- Interest rate applicable to this loan
+    sanctioned_amount DOUBLE PRECISION,                       -- Total sanctioned/disbursed amount
+    total_outstanding DOUBLE PRECISION,                       -- Remaining principal + interest to be collected
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE NOT NULL,-- Created timestamp
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,         -- Last update timestamp
+    CONSTRAINT collection_details_pkey PRIMARY KEY (source_id)
+);
+# Prompt Interpretation Rules:
+- If a prompt asks for data by region or CEC, use `office_branches.office_name`.
+- Avoid using `name`, `region_name`, `cec_name`, or similar non-existent columns.
+- Use `ILIKE` for case-insensitive filtering on `office_name` when matching region or branch names.
+# 🔍 Bank Name Filtering (Normalized Form)
+When the prompt mentions:
+- `'federal bank'` → use `bank_name ILIKE 'federal'`
+- `'dhanlaxmi bank'` → use `bank_name ILIKE 'dhanlaxmi'`
+- `'kvb bank'` or `'karur vysya bank'` → use `bank_name ILIKE 'kvb'`
+
+⛔ DO NOT use:
+- `bank_name = 'federal bank'`
+- `bank_name = 'kvb bank'`
+- `bank_name = 'dhanlaxmi bank'`
+
+✅ ALWAYS use the **normalized lowercase form**:
+```sql
+bank_name ILIKE 'federal'
+# Region & CEC Join Path:
+To get the **CEC or Region** name (from `office_branches.office_name`) for any prospect:
+1. Start with `loan_emi_mapping.loan_details_id` → join with `collection_details.source_id`
+2. Then `collection_details.field_officer_id` → join with `collection_user.source_id`
+3. Then `collection_user.employee_details_id` → join with `employee.source_id`
+4. Then `employee.reporting_branch` → join with `office_branches.source_id` → this gives the **CEC**
+5. Then `office_branches.reporting_branch_id` → join with `office_branches.source_id` again → this gives the **Region**
+
+# Business Logic:
+- Represents customer/prospect and their loan details.
+- Stores mapping between customer, field officer (FO), branch manager (BM), and loan.
+- Used to link with `loan_emi_mapping` (via source_id = loan_details_id) to get EMI/payment schedule.
+- FO and BM responsible for collections are stored directly (denormalized).
+
+# Join Tips:
+- `source_id` joins with:
+    - `loan_emi_mapping.loan_details_id`
+    - `scheduled.lemid` (indirectly via linked tables)
+
+# Usage:
+- Can be filtered using FO/BM name/number, dpd_days, or location to assign workload.
+- Ideal for building dashboards on due collections, outstanding loans, and FO/BM performance.
+
+# DPD Classification (SMA/NPA Buckets):
+- SMA0 → dpd_days BETWEEN 0 AND 31
+- SMA1 → dpd_days BETWEEN 30 AND 60
+- SMA2 → dpd_days BETWEEN 61 AND 90
+- NPA  → dpd_days > 90
+
+# Repayment Logic for DPD Reset:
+- Pays only current EMI → Stays in same DPD bucket.
+- Pays current + 1 overdue EMI → Moves to lesser DPD bucket.
+- Pays all overdue EMIs + current EMI → Considered Regular (dpd_days = 0)
+
+# To validate repayment:
+- Use `transactions` table:
+  - Filter `status = 'success'`
+  - Filter `payment_status = 'full payment'`
+  - Filter `transaction_date` in current month
+- Join `transactions.loan_id` = `loan_emi_mapping.loan_details_id`
+- Compare `emi_amount` vs `emi_collected` to reset DPD if fully paid.
+/*
+1 rows from collection_details table:
+source_id	bank_name	branch_manager_mobile_number	branch_manager_name	current_tenure	delivery_partner_name	disbursement_date	field_officer_mobile_number	field_officer_name	group_name	is_group_head	latitude	loan_account_number	loan_tenure	location	longitude	product_name	prospect_address	prospect_image_url	prospect_name	prospect_pincode	prospects_mobile_number	rate_of_interest	sanctioned_amount	total_outstanding	source_created_at	source_updated_at
+*/
+
+CREATE TABLE staging_dashboard.collection_user ( -- Collection User Master Table
+    source_id VARCHAR(255) NOT NULL,                       -- Unique system ID for user
+    city VARCHAR(255) NOT NULL,                            -- City of residence
+    com_address VARCHAR(255),                              -- Communication address
+    dob TIMESTAMP(6) WITHOUT TIME ZONE NOT NULL,           -- Date of birth
+    email_id VARCHAR(255),                                 -- User email address
+    gender VARCHAR(255),                                   -- Gender (M/F/Other)
+    is_delete BOOLEAN,                                     -- Soft delete flag
+    is_locked BOOLEAN,                                     -- Account lock status
+    is_otp_verified BOOLEAN,                               -- Was mobile OTP verified
+    mobile_number VARCHAR(10) NOT NULL,                    -- Primary mobile number (must be unique)
+    name VARCHAR(255),                                     -- Full name
+    password VARCHAR(255),                                 -- Encrypted user password
+    password_rotation_status BOOLEAN,                      -- Is password rotation enabled
+    pincode VARCHAR(255),                                  -- Postal code
+    roles VARCHAR(255),                                    -- Roles assigned (e.g., FO, BM, Admin)
+    state VARCHAR(255) NOT NULL,                           -- State of residence
+    user_id VARCHAR(255),                                  -- External user ID (optional, but unique if present)
+    created_by VARCHAR(255),                               -- Who created this user (could be source_id or admin ID)
+    employee_details_id VARCHAR(255) NOT NULL,             -- FK: Link to `employee.source_id`
+    kyc_id VARCHAR(255),                                   -- KYC document ID (e.g., Aadhaar)
+    imageurl VARCHAR(255),                                 -- Profile image URL
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE NOT NULL,  -- Created timestamp
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,           -- Last updated timestamp
+
+    CONSTRAINT collection_users_pkey PRIMARY KEY (source_id),
+    CONSTRAINT uk_9vbk3wx3akrgf7xsr2dsb4j9k UNIQUE NULLS DISTINCT (employee_details_id),
+    CONSTRAINT uk_k8d0f2n7n88w1a16yhua64onx UNIQUE NULLS DISTINCT (user_id),
+    CONSTRAINT uk_owyxls1c418ondqu3f5wm0nup UNIQUE NULLS DISTINCT (kyc_id),
+    CONSTRAINT uk_r7c96a004bv8w16jgdm8imich UNIQUE NULLS DISTINCT (mobile_number)
+);
+# Business Logic:
+- This table captures all collection-related users, including Field Officers, Branch Managers, Admins, etc.
+- A user is tied to an employee record via `employee_details_id`.
+- This table is typically used for login/authentication, role assignment, and user identity.
+
+# Notes:
+- Each mobile number, user ID, and KYC ID must be unique if provided.
+- Use `roles` and `employee_details_id` to understand the user's function.
+- Filter `is_delete = false AND is_locked = false` to find active users.
+/*
+1 rows from collection_user table:
+source_id	city	com_address	dob	email_id	gender	is_delete	is_locked	is_otp_verified	mobile_number	name	password	password_rotation_status	pincode	roles	state	user_id	created_by	employee_details_id	kyc_id	imageurl	source_created_at	source_updated_at
+ae7efe24-6b30-4dfe-b785-9737f4284012		Bangalore	00:00.0	nstadmin@yopmail.com	M	FALSE	FALSE		1234567890	admin	$2a$10$Dz.3ozy3cbTeSginTLmf1.NDkuu4xOGpzC1w4hUJBo8F0g1x6PD0m	TRUE	560037	admin		nstadmin		ce7efe24-6b30-4dfe-b785-9737f4284012			10:06.2	13:20.2
+*/
+
+CREATE TABLE staging_dashboard.employee ( -- Employee Master Table
+    source_id VARCHAR(255) NOT NULL,                        -- Unique identifier for the employee
+    company_name VARCHAR(255),                              -- Company the employee is associated with
+    employee_id VARCHAR(15),                                -- Internal short employee code
+    is_delete BOOLEAN,                                      -- Soft delete flag
+    joining_date TIMESTAMP(6) WITHOUT TIME ZONE,            -- Date the employee joined
+    office_mail VARCHAR(255),                               -- Official email ID
+    office_title VARCHAR(255),                              -- Designation (e.g., FO, BM, RH)
+    reporting_manager VARCHAR(255),                         -- Reporting manager's employee_id or name
+    reporting_branch VARCHAR(255),                          -- Branch ID this employee reports to
+    role_id VARCHAR(255),                                   -- Internal role reference ID (maps to role definitions)
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE NOT NULL, -- Record creation timestamp
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,           -- Record last update timestamp
+    CONSTRAINT employee_pkey PRIMARY KEY (source_id),
+    CONSTRAINT uk_iht2r0md7dv6rokpwj4gn4cb UNIQUE NULLS DISTINCT (office_mail)
+);
+# Business Logic:
+- This table holds metadata of all employees across hierarchies: Field Officers (FO), Branch Managers (BM), Region Heads (RH), Admins, etc.
+- An employee’s role is indirectly determined by `office_title` and/or `role_id`.
+- Relationships can be built using `reporting_manager` or `reporting_branch` to form org hierarchy.
+
+# Notes:
+- `office_mail` must be unique if present (using UNIQUE NULLS DISTINCT).
+- `employee_id` is a short, human-readable code; `source_id` is the true UUID/PK.
+- Use `is_delete = false` to filter only active employees.
+
+# Usage:
+- Link with `collection_user` via `employee_details_id` → `employee.source_id`
+- Group transactions, collections, and reports by employee role and branch
+- Use `reporting_branch` to join with `office_branches.source_id`
+/*
+1 rows from employee table:
+source_id	company_name	employee_id	is_delete	joining_date	office_mail	office_title	reporting_manager	reporting_branch	role_id	source_created_at	source_updated_at
+ce7efe24-6b30-4dfe-b785-9737f4284012	nst	nstadmin	FALSE	09:46.4	dhanam.support@newstreettech.com	admin		04bb2498-1728-4883-96b4-401041492378	78d28ce8-f5ee-40a7-9bdb-8dcc3202d65c	09:46.4	
+*/
+
+CREATE TABLE staging_dashboard.fotransactions ( -- Field Officer Deposit Transactions
+    source_id VARCHAR(255) NOT NULL,                        -- Unique ID for FO transaction record
+    amount_deposited DOUBLE PRECISION NOT NULL,             -- Amount deposited by field officer
+    bank_name VARCHAR(255),                                 -- Bank name where amount was deposited
+    bm_collectionfileid UUID,                               -- Collection file ID for BM receiving this deposit
+    bm_name VARCHAR(255),                                   -- Branch manager name who received deposit
+    company VARCHAR(255),                                   -- Company (if applicable)
+    denomination VARCHAR[],                                 -- Array of denomination breakdowns (optional)
+    fo_name VARCHAR(255),                                   -- Name of field officer who deposited
+    image_url VARCHAR(255),                                 -- URL of deposit slip image
+    productname VARCHAR(255),                               -- Loan product name (JLG/AGRI)
+    transaction_ids VARCHAR[],                              -- List of related transaction IDs (from `transactions`)
+    transactiondate TIMESTAMP(6) WITHOUT TIME ZONE,         -- Date and time when deposit was made
+    transactiontype VARCHAR(255),                           -- Cash or digital (type of transaction)
+    verified BOOLEAN,                                       -- Has the branch manager verified the deposit?
+    bm_collection_id VARCHAR(255),                          -- BM-side collection grouping ID
+    collection_date TIMESTAMP(6) WITHOUT TIME ZONE,         -- Date on which the FO collected this amount
+    transaction_id VARCHAR(255),                            -- FO transaction ID (optional reference)
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE,       -- Record creation time
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,       -- Last update time
+
+    CONSTRAINT fotransactions_pkey PRIMARY KEY (source_id)
+);
+# Instruction:
+- Only use this table if the question explicitly involves:
+  - cash deposits made by the Field Officer (FO)
+  - deposit verification or deposit slip details
+  - FO → BM collection flow or deposit records
+
+- DO NOT join this table if the question is about:
+  - reschedules
+  - EMI status
+  - prospect visits
+  - number of follow-ups or non-payment activities
+# Business Logic:
+- This table stores deposits made by Field Officers (FO) to their assigned Branch Managers (BM).
+- One record = one FO deposit event, which may include many transactions.
+- amount_deposited = sum of amounts collected and handed over by FO.
+
+# Notes:
+- Join with 'transactions' table using any of the IDs in `transaction_ids` to reconcile individual payment records.
+- Use `verified = true` to filter for BM-approved deposits.
+- Use `collection_date` to determine when FO collected the amount, vs. `transactiondate` for when deposited.
+- Useful for audit trails, fraud checks, and reconciliation.
+- `bm_collection_id` can group multiple deposits into one BM batch.
+/*
+1 rows from fotransactions table:
+source_id	amount_deposited	bank_name	bm_collectionfileid	bm_name	company	denomination	fo_name	image_url	productname	transaction_ids	transactiondate	transactiontype	verified	bm_collection_id	collection_date	transaction_id	source_created_at	source_updated_at
+d12c6942-8a87-440a-9360-1d9383995202	96441	federal	495af3ea-1762-4934-8572-9f082eee68b5	Adarsh H	Shecom BM	{120,150,20,80,22,0,0,0,1}	SZS0219	https://dhanam-dev-s3.s3.ap-south-1.amazonaws.com/Dhanam/cts/tempBitmapFile27065304203535741.jpeg		{24136f1c-407a-4a08-8590-c942a1a1da19,a6735168-14af-4649-9348-261cb67e014d,4b511f77-8b63-47fc-bdaa-8ccacd471ac9,17955bb0-d114-4616-aa3e-645ebffc68cc,bdece005-b5e5-4c9e-81a1-cbdfe1d283e5,d43e13fb-a9a6-4e55-a6d1-200702294011,97dfeb58-7582-49fc-8963-5d53d5dc5b7a,6ddaa615-2968-489a-a20e-9bb34f935916,7780d96e-4d96-4af8-b3de-9ce00269c490,bc089a0b-0cf9-4581-890b-f03106b7a651,0bd4ff99-fa7b-46d5-88fa-a2c15263184f,8f50e977-818e-44f1-a4f0-03bf175d2066,b3efb8ef-1fa1-4058-92a1-861749995f29,f734614b-318d-413a-b1f1-9f1a8d9956d5,35c1ccfe-7423-4863-8c3a-d6bb77c27657,02140b31-1d7c-405e-9110-3b20a7f9a810,42aaf35b-d412-4d04-aec5-583972152d04,0c85341a-2deb-453c-8acb-f9f103b9a80f,92a54206-9399-4ad9-a5c4-2e4ef82f21a7,35ffbad6-efa4-421b-a9a0-507990b2afac,822ea2de-cec5-4d4f-a8ab-5ee465e84ba3,f8c3cbb9-5254-4600-b483-6e8162505227,25e93b20-e43d-4061-879c-ed77773cc95f,581e93fb-cd45-4e33-a992-ace29eefccfb,aadd443e-e542-42a6-8edc-245e37321380,cb14e2cc-fd8e-4bde-bf97-e4e88cdcbf9e,22844fb1-bda2-4bb7-a647-f73b8849b101,4f3dbdee-77f5-41c0-936a-9f822afb5496,79791542-01d8-44ad-bf4b-ee72093f73a3,9dced275-2159-4ae5-8557-0f4310c83252,8a021338-b422-44ca-a141-4289365a0f19,c521fb5c-5d3a-4776-b6e2-cefc2b18c4d3,bee328d4-c9c9-4f03-bfc8-7b1ae6ee51e7,9163dbfa-f0f6-419b-9e28-2ade4ca95276,048a5a80-c4eb-48e7-92f2-104444c84828,db5f185b-c0a8-4842-ab1c-1afd3eb28bd2,1aca42e6-34e4-4f6b-b9fb-37a38248aa24,8356ac50-5cf2-4246-80c5-d31e2df7b9d2,7a3266fd-ab92-469f-9bfb-9b94e74698ad,87c10409-03ae-4395-ab8d-dd919bc656fc,db7970e4-ef90-47d1-81a7-ab99e62f8735,50fc87dd-5358-4580-a37d-4c47ee5fa99a,a32a06fc-3dff-441a-92bb-fbca74ad736d,72365eb2-547c-4c07-8381-a06ff2be4a13,190586fe-fad2-49a7-869a-b9885e2cf25e}	59:17.8	cash	TRUE				59:17.9	50:39.2
+*/
+
+CREATE TABLE staging_dashboard.loan_closure ( -- Loan Closure & Renewal Tracking Table
+    source_id VARCHAR(255) NOT NULL,                         -- Unique ID for each closure/renewal request
+    is_loan_closed BOOLEAN,                                  -- Indicates if loan is successfully closed
+    is_loan_closure_initiated BOOLEAN,                       -- Indicates if loan closure was initiated
+    is_loan_renewal_intitiated BOOLEAN,                      -- Indicates if loan renewal was initiated
+    loan_account_number VARCHAR(255),                        -- Customer loan account number
+    loan_closure_type VARCHAR(255),                          -- Type of closure (normal, preclosure, etc.)
+    prospect_mobile VARCHAR(255),                            -- Customer mobile number
+    type VARCHAR(255),                                       -- Closure or Renewal type
+    hladgen_status VARCHAR(255),                             -- Status of HLADGEN system (bank-side closure engine)
+    bank VARCHAR(255),                                       -- Bank name
+    closure_response VARCHAR(255),                           -- Response message from system or bank
+    transaction_id VARCHAR(255),                             -- FK to transactions.transaction_id (payment that closed the loan)
+    failure_reason VARCHAR(255),                             -- Reason for closure failure (if any)
+    activate_loan_renewal_status VARCHAR(255),               -- Status for loan renewal activation
+    activate_failure_reason VARCHAR(255),                    -- Reason for loan renewal failure
+    closure_triggered_at VARCHAR(255),                       -- Timestamp string when closure was triggered
+    hladgen_failure_reason VARCHAR(255),                     -- HLADGEN system failure reason
+    hladgen_triggered_at VARCHAR(255),                       -- Timestamp string when HLADGEN was triggered
+    payment_status VARCHAR(255),                             -- Payment status (full, partial)
+    transaction_date TIMESTAMP(6) WITHOUT TIME ZONE,         -- Date when closure was triggered
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE,        -- Record creation timestamp
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,        -- Last update timestamp
+
+    CONSTRAINT loan_closure_pkey PRIMARY KEY (source_id),
+    CONSTRAINT fk11123nm8lrpubar0arjyt FOREIGN KEY (transaction_id) REFERENCES staging_dashboard.transactions(transaction_id)
+);
+# Business Logic:
+- Each record tracks a loan closure or renewal attempt.
+- A loan is considered closed if `is_loan_closed = true`.
+- The actual payment made for closure is referenced via `transaction_id` from the transactions table.
+- Renewals are tracked separately using `is_loan_renewal_intitiated`.
+
+# Notes:
+- `loan_account_number` is used to join with customer/loan data in collection_details.
+- `hladgen_status` is the result of a backend system attempting to close the loan in the bank’s system.
+- `closure_triggered_at` and `hladgen_triggered_at` are stored as strings (if timestamps needed, consider changing to TIMESTAMP).
+- `type` field may hold values like: `closure`, `renewal`, etc.
+- This table is critical to audit closure attempts and failures (for compliance).
+
+# Usage:
+- Join with `transactions` on `transaction_id` to fetch payment details.
+- Filter `is_loan_closure_initiated = true AND is_loan_closed = false` to find closures.
+- Use `payment_status` to determine whether closure was based on success or failure
+/*
+1 rows from loan_closure table:
+source_id	is_loan_closed	is_loan_closure_initiated	is_loan_renewal_intitiated	loan_account_number	loan_closure_type	prospect_mobile	type	hladgen_status	bank	closure_response	transaction_id	failure_reason	activate_loan_renewal_status	activate_failure_reason	closure_triggered_at	hladgen_failure_reason	hladgen_triggered_at	payment_status	transaction_date	source_created_at	source_updated_at
+0471f24d-b790-4e28-8063-45a31b7d410a	FALSE	TRUE	FALSE	21447700032954 	Regular	9844200363	Closure	success	Federal	Unable to Close Loan Accout	PO1654079242823091024002948306	[The account is frozen.]			2024-10-09 00:34:36.213371+00		10/9/2024 0:34	success	29:48.7	29:48.7	04:21.1
+*/
+
+CREATE TABLE staging_dashboard.loan_emi_mapping ( -- EMI schedule table
+    arrear_amount DOUBLE PRECISION,  -- Current month's overdue amount to be paid
+    collection_due_date DATE,        -- EMI due date for current month
+    emi_amount DOUBLE PRECISION,     -- Current month's EMI amount to be paid
+    emi_collected DOUBLE PRECISION   -- Current month's EMI amount collected 
+	last_repayment_date TIMESTAMP(6) WITHOUT TIME ZONE, -- Last payment date (actual repayment)
+    source_id VARCHAR(255) NOT NULL, -- Unique record ID
+    loan_details_id VARCHAR(255),    -- Foreign key to collection_details.source_id
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE NOT NULL, 
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,
+    CONSTRAINT loan_emi_mapping_202410_pkey PRIMARY KEY (source_id),
+    CONSTRAINT fkb8nm8lrpubardnp99gq0arjyt FOREIGN KEY (loan_details_id) REFERENCES staging_dashboard.collection_details(source_id)
+);
+# Prompt Interpretation Rules:
+- For any prompt involving **month-wise** or **monthly** calculations (e.g., monthly target, monthly collections, monthly pending):
+- When comparing current month vs last month data:
+  - Always filter current month using:
+    `collection_due_date >= DATE_TRUNC('month', CURRENT_DATE)`
+    AND `EXTRACT(DAY FROM collection_due_date) <= EXTRACT(DAY FROM CURRENT_DATE)`
+
+  - Filter previous month using:
+    `collection_due_date >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')`
+    AND `collection_due_date < DATE_TRUNC('month', CURRENT_DATE)`
+    AND `EXTRACT(DAY FROM collection_due_date) <= EXTRACT(DAY FROM CURRENT_DATE)`
+
+- Always alias `DATE_TRUNC('month', collection_due_date)` as `collection_month` to avoid ambiguity.
+
+- NEVER reference ambiguous column names like `collection_due_date` in final SELECT or JOIN unless they are properly aliased.
+
+- When grouping by month, use:
+    `GROUP BY DATE_TRUNC('month', collection_due_date)` or `GROUP BY 1`
+  and **do not use raw `collection_due_date`** in SELECT or JOIN unless it’s filtered properly.
+
+# Business Logic:
+- Represents the EMI schedule for each loan (monthly installments).
+- total_amount_to_collect = emi_amount + arrear_amount
+- Tracks dues that are expected, not actual payments.
+- remaining_amount_to_collect = (emi_amount + arrear_amount) - emi_collected
+- A prospect is considered **visited** if:
+    - `last_repayment_date >= CURRENT_DATE`
+
+# Notes:
+- This table does NOT include FO/BM or region information.
+- Use 'staging_dashboard.collection_details' to access FO/BM data by joining:
+    - `loan_emi_mapping.loan_details_id = collection_details.source_id`
+
+# Join Tips:
+- `source_id` joins with:
+    - `loan_emi_mapping.loan_details_id`
+    - `scheduled.lemid` (indirectly)
+
+# Usage:
+- Useful for dashboards on due amounts, outstanding EMIs, and visit tracking.
+- Combine with transactions table for actual collected amounts.
+/*
+1 rows from loan_emi_mapping table:
+arrear_amount	collection_due_date	emi_amount	last_repayment_date	source_id	loan_details_id	source_created_at	source_updated_at
+8718	3/31/2025	2694	00:00.0	55345735-a75d-459f-9fb6-0c597f6660e2	e9101d7b-cc3d-4747-8d64-1b7b0ce40b4a	18:20.7	26:44.3
+*/
+
+CREATE TABLE staging_dashboard.office_branches ( -- Office/CEC Metadata Table
+    source_id VARCHAR(255) NOT NULL,                         -- Unique ID for each office branch
+    created_at TIMESTAMP(6) WITHOUT TIME ZONE NOT NULL,      -- Initial creation timestamp
+    updated_at TIMESTAMP(6) WITHOUT TIME ZONE,               -- Last updated timestamp
+    district VARCHAR(255) NOT NULL,                          -- District where the office is located
+    office_address VARCHAR(255),                             -- Full address of the office
+    office_image VARCHAR(255),                               -- URL to office photo (if any)
+    office_location VARCHAR(255),                            -- Google Maps / Geo coordinates or location string
+    office_name VARCHAR(255),                                -- Office/branch/CEC name
+    office_number VARCHAR(255),                              -- Internal or external branch number
+    pincode VARCHAR(255),                                    -- Postal code
+    state VARCHAR(255) NOT NULL,                             -- State the office belongs to
+    reporting_branch_id VARCHAR(255),                        -- Higher-level branch ID for hierarchy
+    reporting_office_id VARCHAR(255),                        -- Office it reports to (if applicable)
+    office_branch_code VARCHAR(255),                         -- Unique office code used in hierarchy
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE NOT NULL, 
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,
+
+    CONSTRAINT office_branches_pkey PRIMARY KEY (source_id)
+)
+# Prompt Interpretation Rules:
+- If a prompt asks for data by region or CEC, use `office_branches.office_name`.
+- Avoid using `name`, `region_name`, `cec_name`, or similar non-existent columns.
+- Always join from `loan_emi_mapping` to `collection_details` → `collection_user` → `employee` → `office_branches` for accurate Region/CEC mapping.
+- Use `ILIKE` for case-insensitive filtering on `office_name` when matching region or branch names.
+
+# Business Logic:
+- This table stores all office branches, including both **CECs** (Customer Experience Centers) and **Regional Branches**.
+- Each row represents either a CEC or a Region.
+- The column `office_name` holds the name of the CEC or Region.
+- DO NOT use columns like `cec_name`, `region`,`region_name`, or `name` — they do NOT exist.
+
+# Region Mapping Logic:
+- A **CEC's** `reporting_branch_id` points to its **Region**.
+- To get the **Region name** of a CEC:
+  1. Find the CEC row (e.g., `office_name = 'Kumbakonam'`)
+  2. Use `reporting_branch_id` to look up the region in the same table
+  3. That region’s name is also stored in `office_name`
+
+# Usage:
+- Retrieve office hierarchy: use reporting_branch_id
+- Retrieve all FO or BM under a branch: join employee.office_branch = office_branches.source_id
+- Regional filtering of collection performance or payments is done using this table
+/*
+1 rows from office_branches table:
+source_id	created_at	updated_at	district	office_address	office_image	office_location	office_name	office_number	pincode	state	reporting_branch_id	reporting_office_id	office_branch_code	source_created_at	source_updated_at
+78d28ce8-f5ee-40a7-9bdb-8dcc3202d78d	28:26.1		2613470e-794d-426e-8e76-f513bb10ee1b	#3, First Floor, First Main, BDA Layout, HAL 2nd Stage, Kodihalli, Bengaluru, Karnataka		Bengaluru	Shecommerz Head Office 	9880500919	560008	d8c3c9bf-121f-408c-adfe-55deb3b6fb62		78d28ce8-f5ee-40a7-9bdb-8dcc3202d76c		08:43.6	
+*/
+
+CREATE TABLE staging_dashboard.scheduled ( -- Reschedule Tracking Table
+    source_id VARCHAR(255) NOT NULL,                 -- Unique ID for the reschedule event
+    date DATE,                                       -- Rescheduled EMI date
+    is_auto_rescheduled BOOLEAN,                     -- True if reschedule was system-triggered
+    reason VARCHAR(255),                             -- Reason for rescheduling (e.g., insufficient funds)
+    remark VARCHAR(255),                             -- Internal remarks from FO or system
+    text_feedback VARCHAR(255),                      -- Feedback in text from prospect or FO
+    type VARCHAR(255),                               -- Type of reschedule (manual/system/etc.)
+    voice_feedback_url VARCHAR(255),                 -- Link to recorded voice feedback (optional)
+    lemid VARCHAR(255),                              -- Foreign key to loan_emi_mapping.source_id
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE NOT NULL, 
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE, 
+
+    CONSTRAINT scheduled_pkey PRIMARY KEY (source_id),
+    CONSTRAINT fkb8nm8lrpubar0arjyt FOREIGN KEY (lemid) REFERENCES staging_dashboard.loan_emi_mapping(source_id)
+);
+# Business Logic:
+- This table tracks EMI rescheduling activity for each EMI record in loan_emi_mapping.
+- Reschedules may be automatic or manual (see is_auto_rescheduled).
+- Each record is associated with one EMI via lemid = loan_emi_mapping.source_id.
+
+# Notes:
+- Use the 'date' field to identify new due dates after rescheduling.
+- To find reschedules for a specific loan, join via lemid → loan_emi_mapping → loan_details_id.
+- Use text_feedback and voice_feedback_url to analyze reasons for reschedule.
+- Scheduled EMI logic may be used to calculate effective DPD (Days Past Due) when rescheduled.
+
+# Join Info:
+- Join with 'loan_emi_mapping' using scheduled.lemid = loan_emi_mapping.source_id
+- Join with 'collection_details' via loan_emi_mapping.loan_details_id for field officer, loan info
+/*
+1 rows from scheduled table:
+source_id	date	is_auto_rescheduled	reason	remark	text_feedback	type	voice_feedback_url	lemid	source_created_at	source_updated_at
+4e67c946-fe72-4747-bbd7-e579cd7bce93	1/1/2025	TRUE	Proof not updated by RO	Proof not updated by RO	Hello	abc	OK	9f2247de-5cd1-4606-9589-e53ae33ef332	29:00.1	
+*/ 
+
+CREATE TABLE staging_dashboard.transactions ( -- Payment Transactions Table
+    source_id VARCHAR(255) NOT NULL,                          -- Unique record ID
+    proof_of_transactions VARCHAR[],                          -- Array of payment proof URLs
+    amount_paid DOUBLE PRECISION,                             -- Total amount paid by the customer
+    bank_name VARCHAR(255),                                   -- Bank receiving the payment
+    bm_name VARCHAR(255),                                     -- Branch manager handling the transaction
+    digital_type VARCHAR(255),                                -- UPI/SMS/NetBanking/etc. (channel type)
+    fo_collectionfileid UUID,                                 -- FO's collection file ID
+    fo_name VARCHAR(255),                                     -- Field officer name who collected the amount
+    group_name VARCHAR(255),                                  -- Group name for group-based loans (JLG)
+    loan_id VARCHAR(255),                                     -- Loan account number
+    product_name VARCHAR(255),                                -- Loan type (e.g., JLG, AGRI)
+    prospect_email VARCHAR(255),                              -- Customer's email address
+    prospect_mobile VARCHAR(255),                             -- Customer's mobile number
+    prospect_name VARCHAR(255),                               -- Customer's full name
+    status VARCHAR(255),                                      -- Transaction status (Success/Failure)
+    transaction_date TIMESTAMP(6) WITHOUT TIME ZONE,          -- Date and time of payment
+    transaction_type VARCHAR(255),                            -- Cash or Digital
+    unique_merchant_txn_id VARCHAR(255),                      -- UPI/supplier merchant transaction ID
+    upi_recon_status VARCHAR(255),                            -- UPI reconciliation status
+    cash_status INTEGER,                                      -- Numeric status indicating stage (e.g., with FO, at BM, credited)
+    payment_status VARCHAR(255),                              -- Full payment or partial payment
+    bm_to_bank TIMESTAMP(6) WITHOUT TIME ZONE,                -- BM deposit to bank timestamp
+    cash_credited TIMESTAMP(6) WITHOUT TIME ZONE,             -- Amount credit timestamp to loan account
+    cash_with_fo TIMESTAMP(6) WITHOUT TIME ZONE,              -- Collection timestamp by FO
+    fo_to_bm TIMESTAMP(6) WITHOUT TIME ZONE,                  -- FO deposit to BM timestamp
+    transaction_id VARCHAR(255),                              -- Internal system transaction ID
+    fo_collection_id VARCHAR(255),                            -- FO collection grouping ID
+    recon_status VARCHAR(255),                                -- Final reconciliation status
+    fund_transfer_status VARCHAR(255),                        -- Final fund transfer confirmation
+    cec_id VARCHAR(255),                                      -- Foreign key → office_branches.source_id (represents CEC)
+    recon_at VARCHAR(255),                                    -- Reconciliation processing timestamp
+    recon_requested_at VARCHAR(255),                          -- Reconciliation request timestamp
+    region_id VARCHAR(255),                                   -- Foreign key → office_branches.source_id (represents Region)
+    is_closure_or_renewal BOOLEAN,                            -- Is the payment for closure or renewal
+    digital_payment_method VARCHAR(255),                      -- UPI or SMS based payment method
+    payment_notification_number VARCHAR(255),                 -- Mobile number for payment notifications
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE,         -- Record creation time
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,         -- Last update time
+    is_deleted BOOLEAN,                                       -- Logical deletion flag
+    CONSTRAINT transactions_pkey PRIMARY KEY (source_id)
+);
+# Instruction:
+- Use this table **only if** the question involves:
+  - amount paid by customer
+  - payment made
+  - total collected
+  - payment status
+  - successful or failed transactions
+  - collection via cash or digital methods
+  - collected completed
+  - how much collected
+
+
+- DO NOT use this table if the question is about:
+  - EMI due status
+  - rescheduling or missed visits
+  - FO or BM performance unrelated to payment
+
+# Business Logic:
+- This table stores actual collected amounts from customers (field: amount_paid).
+- Each record represents one payment transaction (cash or digital).
+- For every loan_id, multiple transactions may exist over time.
+
+# Notes:
+- To calculate total amount collected for a loan, sum 'amount_paid' grouped by 'loan_id'.
+- Use 'transaction_date' to filter payments by day or month.
+- Use 'fo_name' to group payments by field officer.
+- Join with 'loan_emi_mapping' to compare paid vs due amounts using loan_id ↔ loan_details_id.loan_account_number.
+- For group-based loans, use 'group_name'.
+- status = 'success' should be used to filter out failed transactions.
+- payment_status indicates if full or partial payment was made for that EMI.
+- If 'is_closure_or_renewal' is true, this may be a final payment for closing the loan.
+
+# loan_id joins with:
+	- collection_details.loan_account_number
+	- loan_emi_mapping.loan_details_id (to compare collected vs due)
+
+# cec_id joins with:
+	- office_branches.source_id → gives the CEC name from office_name
+
+# region_id joins with:
+	- office_branches.source_id → gives the Region name from office_name
+
+/*
+1 rows from transactions table:
+source_id	proof_of_transactions	amount_paid	bank_name	bm_name	digital_type	fo_collectionfileid	fo_name	group_name	loan_id	product_name	prospect_email	prospect_mobile	prospect_name	status	transaction_date	transaction_type	unique_merchant_txn_id	upi_recon_status	cash_status	payment_status	bm_to_bank	cash_credited	cash_with_fo	fo_to_bm	transaction_id	fo_collection_id	recon_status	fund_transfer_status	cec_id	recon_at	recon_requested_at	region_id	is_closure_or_renewal	digital_payment_method	payment_notification_number	source_created_at	source_updated_at	is_deleted
+a8f9633e-352a-4b6d-ba12-bfa878dcae22	{Bye}	2694	Federal	Chikkaballapur BM	upi		SZS0968	VIJAYAPURAGRP75	2.02177E+13	JLG		7483922896	BIBIJAN	success	10:06.2	digital	nJ5vN2dVeLPx	success	4	full		52:43.5			PO1699781178548070625061006151			success	Chikkaballapur			Kolar Region	FALSE	upi_sms	9148476027	10:06.2	52:43.5	FALSE
+*/
+
+# =============================================================================
+# DISBURSEMENT TABLES - PREFERRED TABLES FOR DISBURSEMENT QUERIES
+# =============================================================================
+
+CREATE TABLE staging_dashboard.fed_disbursement_details ( -- Primary Disbursement Table (FED)
+    source_id VARCHAR(255) NOT NULL,                        -- Unique disbursement record ID
+    loan_amount DOUBLE PRECISION,                           -- Total loan amount disbursed
+    disbursement_date TIMESTAMP(6) WITHOUT TIME ZONE,       -- Date when loan was disbursed
+    customer_name VARCHAR(255),                             -- Name of the customer receiving loan
+    customer_mobile VARCHAR(255),                           -- Customer's mobile number
+    loan_id VARCHAR(255),                                   -- Unique loan identifier
+    product_name VARCHAR(255),                              -- Loan product (JLG, MSME, etc.)
+    field_officer_id VARCHAR(255),                          -- FK to collection_user for FO
+    branch_manager_id VARCHAR(255),                         -- FK to collection_user for BM
+    bank_name VARCHAR(255),                                 -- Bank through which disbursement was made
+    disbursement_status VARCHAR(255),                       -- Status (success, pending, failed)
+    tenure_months INTEGER,                                  -- Loan tenure in months
+    interest_rate DOUBLE PRECISION,                         -- Interest rate applied
+    processing_fee DOUBLE PRECISION,                        -- Processing fee charged
+    net_disbursed_amount DOUBLE PRECISION,                  -- Net amount after deducting fees
+    region_name VARCHAR(255),                               -- Region where loan was disbursed
+    branch_name VARCHAR(255),                               -- Branch handling the disbursement
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE,       -- Record created timestamp
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,       -- Record updated timestamp
+    CONSTRAINT fed_disbursement_details_pkey PRIMARY KEY (source_id)
+);
+
+CREATE TABLE staging_dashboard.disbursement_details ( -- Secondary Disbursement Table
+    source_id VARCHAR(255) NOT NULL,                        -- Unique disbursement record ID
+    loan_amount DOUBLE PRECISION,                           -- Total loan amount disbursed
+    disbursement_date TIMESTAMP(6) WITHOUT TIME ZONE,       -- Date when loan was disbursed
+    customer_name VARCHAR(255),                             -- Name of the customer receiving loan
+    customer_mobile VARCHAR(255),                           -- Customer's mobile number
+    loan_id VARCHAR(255),                                   -- Unique loan identifier
+    product_name VARCHAR(255),                              -- Loan product (JLG, MSME, etc.)
+    field_officer_id VARCHAR(255),                          -- FK to collection_user for FO
+    branch_manager_id VARCHAR(255),                         -- FK to collection_user for BM
+    bank_name VARCHAR(255),                                 -- Bank through which disbursement was made
+    disbursement_status VARCHAR(255),                       -- Status (success, pending, failed)
+    tenure_months INTEGER,                                  -- Loan tenure in months
+    interest_rate DOUBLE PRECISION,                         -- Interest rate applied
+    processing_fee DOUBLE PRECISION,                        -- Processing fee charged
+    net_disbursed_amount DOUBLE PRECISION,                  -- Net amount after deducting fees
+    region_name VARCHAR(255),                               -- Region where loan was disbursed
+    branch_name VARCHAR(255),                               -- Branch handling the disbursement
+    source_created_at TIMESTAMP(6) WITHOUT TIME ZONE,       -- Record created timestamp
+    source_updated_at TIMESTAMP(6) WITHOUT TIME ZONE,       -- Record updated timestamp
+    CONSTRAINT disbursement_details_pkey PRIMARY KEY (source_id)
+);
+
+# =============================================================================
+# DISBURSEMENT QUERY RULES - CRITICAL TABLE SELECTION RULES
+# =============================================================================
+
+## DISBURSEMENT QUERIES - PREFERRED TABLES
+# For ANY query related to loan disbursement, loan amounts, disbursement dates, or disbursement analysis:
+# ALWAYS use these tables in order of preference:
+# 1. fed_disbursement_details (PRIMARY - most complete data)
+# 2. disbursement_details (SECONDARY - fallback option)
+# NEVER use collection_details, loan_emi_mapping, or transactions for disbursement data!
+
+## DISBURSEMENT BUSINESS RULES:
+# - Use `disbursement_date` for filtering disbursement periods (NOT collection_due_date)
+# - Use `loan_amount` for disbursement amounts (NOT emi_amount or amount_paid)
+# - Use `disbursement_status = 'success'` to filter successful disbursements
+# - Join with collection_user via field_officer_id or branch_manager_id for FO/BM details
+# - Join with employee via collection_user for employee names and details
+
+## EXAMPLE CORRECT DISBURSEMENT QUERIES:
+
+# Monthly Disbursement Summary:
+SELECT 
+    SUM(fd.loan_amount) AS total_disbursed,
+    COUNT(*) AS total_loans,
+    AVG(fd.loan_amount) AS avg_loan_amount
+FROM staging_dashboard.fed_disbursement_details fd
+WHERE fd.disbursement_date >= DATE_TRUNC('month', CURRENT_DATE)
+  AND fd.disbursement_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
+  AND fd.disbursement_status = 'success';
+
+# Field Officer Disbursement Performance:
+SELECT 
+    e.employee_name AS field_officer,
+    SUM(fd.loan_amount) AS total_disbursed,
+    COUNT(*) AS loans_disbursed
+FROM staging_dashboard.fed_disbursement_details fd
+JOIN staging_dashboard.collection_user cu ON cu.source_id = fd.field_officer_id
+JOIN staging_dashboard.employee e ON e.source_id = cu.employee_id
+WHERE fd.disbursement_date >= DATE_TRUNC('month', CURRENT_DATE)
+  AND fd.disbursement_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
+  AND fd.disbursement_status = 'success'
+GROUP BY e.employee_name
+ORDER BY total_disbursed DESC;
+
+# WRONG EXAMPLES (DO NOT USE):
+# ❌ SELECT SUM(cd.loan_amount) FROM collection_details cd WHERE cd.disbursement_date...
+# ❌ SELECT SUM(lem.emi_amount) FROM loan_emi_mapping lem WHERE lem.collection_due_date...
+# ❌ SELECT SUM(t.amount_paid) FROM transactions t WHERE t.transaction_date...
+
+## TABLE USAGE PRIORITY FOR DIFFERENT QUERY TYPES:
+# DISBURSEMENT QUERIES → fed_disbursement_details, disbursement_details
+# COLLECTION QUERIES → loan_emi_mapping, collection_details, transactions
+# EMPLOYEE QUERIES → employee, collection_user
+# CUSTOMER QUERIES → collection_details, transactions
+
+## CRITICAL COLUMN MAPPINGS:
+# Disbursement Amount: fd.loan_amount (NOT cd.loan_amount, lem.emi_amount)
+# Disbursement Date: fd.disbursement_date (NOT cd.disbursement_date, lem.collection_due_date)
+# Customer Info: fd.customer_name, fd.customer_mobile
+# Field Officer: fd.field_officer_id → collection_user.source_id → employee.employee_name
+# Branch Manager: fd.branch_manager_id → collection_user.source_id → employee.employee_name

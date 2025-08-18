@@ -1,0 +1,263 @@
+# Critical RULE 1: Collection vs Disbursement
+
+ 🔐 Critical Rule: Collection Query Enforcement – Disallow _fed and Stage Tables
+ ✅ Applies when the prompt includes:
+   'collection', 'emi collected', 'collected amount', 'due', 'overdue'
+ ✅ Allowed Tables (for collection-related queries only):
+   - staging_dashboard.loan_emi_mapping
+   - staging_dashboard.collection_details
+   - staging_dashboard.collection_user
+   - staging_dashboard.employee
+   - staging_dashboard.office_branches
+ 🚫 DO NOT Use the following tables in any collection context:
+   - ❌ All *_fed tables (e.g., users_fed, masters_cec_fed, loan_life_cycle_fed, etc.)
+   - ❌ staging_dashboard.customer_life_cycle_fed
+   - ❌ staging_dashboard.group_life_cycle_fed
+   - ❌ staging_dashboard.customer_stage_lifecycle
+ 🚫 DO NOT use:
+   - `users_fed` – instead join through collection_user → employee for user details
+   - Any lifecycle tracking or disbursement tables
+ 🛡️ This rule is STRICT and MUST be enforced to prevent mixing disbursement context with collection logic
+
+🛑 Important Rule for Date Filtering:
+When filtering data by month, year, or date ranges in any collection-related query:
+
+✅ Always use the field loan_emi_mapping.collection_due_date
+❌ Do not use collection_details.source_created_at or other date fields in collection_details 
+# to apply filter 
+  - Ensure a join exists:
+    JOIN loan_emi_mapping lem ON lem.collection_details_id = collection_details.source_id
+
+# Critical Rule: ROUND Function on Double Precision in PostgreSQL
+
+✅ Applies To:
+- Any SQL statement using ROUND() on expressions involving decimal values or calculated percentages (e.g., collection percentage)
+
+🧠 Rule:
+- PostgreSQL does NOT support directly rounding `double precision` values using `ROUND(expression, 2)`
+- You MUST cast the expression to `numeric` before rounding to avoid errors
+
+✅ Correct Syntax:
+ROUND((<decimal_expression>)::numeric, 2)
+
+📌 Example:
+ROUND((SUM(lem.emi_collected) * 100.0 / SUM(lem.emi_amount + lem.arrear_amount))::numeric, 2)
+
+🚫 Do NOT:
+- Do not use ROUND(expression, 2) directly on `double precision` or float results without casting
+- Avoid returning values in scientific notation; always format or cast to numeric for full decimal output
+
+🔒 This rule is STRICT and required to prevent SQL runtime errors.
+
+ 🔐 Critical Rule for Date Filtering in Disbursement Queries
+
+ ✅ Applies To:
+   - Any query involving disbursement tables with a date filter on `disbursed_date`
+   - Especially relevant when using `CURRENT_DATE` or date literals in the `WHERE` clause
+
+ ✅ Must:
+   - Always cast or wrap `disbursed_date` using `DATE(disbursed_date)` when comparing against `CURRENT_DATE`
+
+ ✅ Correct Usage:
+   WHERE DATE(disbursed_date) = CURRENT_DATE
+
+ ❌ Incorrect:
+   WHERE disbursed_date = CURRENT_DATE    --  This may fail if disbursed_date has a time component
+
+ 🛡️ Reason:
+   - `disbursed_date` might be a `TIMESTAMP`, while `CURRENT_DATE` is a `DATE`
+   - Avoids mismatches due to time components in timestamps
+
+ 💡 Apply this rule consistently across all tables:
+   - disbursement_details_fed
+   - disbursement_status_history_fed
+   - loan_life_cycle_fed (if filtering on timestamp columns)
+
+# Rule: Always return full decimal values as-is, without rounding or scientific notation
+
+❌ Do NOT:
+  - Use ROUND() unless explicitly asked
+  - Return values in scientific notation like 1.23e+05
+
+✅ Must:
+  - Always return raw decimal values in full precision
+  - Format outputs to avoid scientific notation
+
+🧠 Applies To:
+  - All monetary fields: emi_collected, disbursed_amount, total_outstanding, etc.
+  - All calculated fields like collection percentages
+
+📌 Goal:
+  - Ensure SQL outputs are precise, not truncated or approximated
+  - Avoid confusion in financial reporting
+
+
+# Critical Rule: Top Collections by CEC
+
+✅ Applies To:
+- Prompts asking for top N collections by CEC
+- Terms like: "top collection", "highest collection", "most collected", "top CECs", "highest collected amount"
+
+🧠 Logic:
+- Use `loan_emi_mapping.emi_collected` to calculate collected amount
+- Join the following tables in this order to resolve CEC:
+    1. loan_emi_mapping
+    2. collection_details ON loan_emi_mapping.loan_details_id = collection_details.source_id
+    3. collection_user ON collection_details.field_officer_id = collection_user.source_id
+    4. employee ON collection_user.employee_details_id = employee.source_id
+    5. office_branches ON employee.reporting_branch = office_branches.source_id
+
+✅ Must:
+- `GROUP BY office_branches.office_name` (this is the CEC)
+- Use `SUM(loan_emi_mapping.emi_collected)` as total amount collected
+- Use `COUNT(DISTINCT collection_details.source_id)` as unique customer count
+- Use `ORDER BY total_collected_amount DESC LIMIT N` for top N ranking
+- Date filters must use `loan_emi_mapping.collection_due_date` with `EXTRACT()` or `DATE()` wrappers
+
+🚫 Do NOT:
+- ❌ Use disbursement tables like `loan_life_cycle_fed`, `customer_life_cycle_fed`, `masters_cec_fed`, etc.
+- ❌ Use `TOP N` (this is SQL Server syntax). PostgreSQL requires `LIMIT N`
+- ❌ Use general customer fields like `customer_id`—always count `source_id` from the appropriate table
+- ❌ Include `users_fed`, `customer_stage_lifecycle`, or any `_fed` table not directly related to collections
+
+📌 Example SQL:
+SELECT 
+    ob.office_name AS cec_name,
+    SUM(lem.emi_collected) AS total_collected_amount,
+    COUNT(DISTINCT cd.source_id) AS customer_count
+FROM staging_dashboard.loan_emi_mapping lem
+JOIN staging_dashboard.collection_details cd 
+    ON lem.loan_details_id = cd.source_id
+JOIN staging_dashboard.collection_user cu 
+    ON cd.field_officer_id = cu.source_id
+JOIN staging_dashboard.employee e 
+    ON cu.employee_details_id = e.source_id
+JOIN staging_dashboard.office_branches ob 
+    ON e.reporting_branch = ob.source_id
+WHERE EXTRACT(MONTH FROM lem.collection_due_date) = 6
+  AND EXTRACT(YEAR FROM lem.collection_due_date) = 2025
+GROUP BY ob.office_name
+ORDER BY total_collected_amount DESC
+LIMIT 3;
+
+🔒 This rule is STRICT:
+- Follow join path exactly
+- Only use collection-related tables
+- Count using `.source_id` field for accuracy
+- Do not round unless value is decimal
+
+
+# Critical RULE 2: CPH
+- If the prompt contains `CPH` or `ICPH`
+  → Use `customer_stage_lifecycle` only.
+  - Do **not** use this table for any other prompts that do not explicitly mention "CPH" or "ICPH".
+  - This rule is **strict**. Avoid accidental inclusion of this table in unrelated disbursement or collection prompts.
+
+# RULE 3: Lifecycle Flow Interpretation
+- Only use lifecycle tables (`*_life_cycle_fed`) when asked for:
+    'stage', 'status', 'pipeline', 'approval step', 'who verified', etc.
+
+# Critical RULE 4: Table Strictness
+- masters_cec_fed should only be used for disbursement office mapping.
+- Never use it in collection metrics or queries.
+
+# Critical Rule 5: Enforce Valid WHERE Clause Filters Use Only Allowed Level for Lifecycle Tables
+✅ Applies To:
+- customer_life_cycle_fed
+- loan_life_cycle_fed
+- group_life_cycle_fed
+- customer_stage_lifecycle
+
+🚫 Do NOT:
+- Do NOT Use any `level` or `status` values that are directly mentioned in the prompt unless they match exactly with those in the official "Possible Level and Status combinations" for the respective table.
+- Do NOT Make up or guess values like `PASSED`, `DISBURSED`, `REVIEWED`, `STARTED`, etc., if they are not explicitly listed as valid for that table.
+
+✅ Must:
+- Always match `level` and `status` against the documented allowed pairs for the table being queried.
+- If the prompt uses a loose term (e.g., "credit check passed"), it must be mapped to a valid level (`CREDIT_CHECK`) and status (`APPROVED`) as per the documentation.
+
+📌 Example Mappings:
+- "disbursed" → level = `LOAN_DISBURSED`, status = `COMPLETED`
+- "credit check passed" → level = `CREDIT_CHECK`, status = `APPROVED`
+- "kyc done" → level = `EKYC`, status = `COMPLETED`
+
+💡 Enforcement:
+- Use only the exact level-status pairs defined for that table.
+- Any deviation or unrecognized value must result in query rejection or correction.
+🔒 This rule is STRICT — lifecycle tables must always operate within these defined enums.
+
+## Prompt-Type: Time or Count Between Levels (Disbursement Lifecycle)
+### Rule 6
+If the prompt is asking about time taken or count of loans/customers moving between two levels (e.g., from EKYC to CREDIT_CHECK):
+
+1. Use `source_created_at` field from lifecycle tables (e.g., `customer_life_cycle_fed`, `loan_life_cycle_fed`, `group_life_cycle_fed`) to measure timestamps.
+2. Perform self-joins or CTEs on the same table to compare stages for the same `cust_id` or `group_id`.
+3. Never use `created_at` or `updated_at` for such comparisons.
+### ✅ Example:
+```sql
+SELECT
+  l1.cust_id,
+  l1.source_created_at AS ekyc_time,
+  l2.source_created_at AS credit_check_time,
+  EXTRACT(EPOCH FROM (l2.source_created_at - l1.source_created_at)) / 3600 AS hours_taken
+FROM customer_life_cycle_fed l1
+JOIN customer_life_cycle_fed l2
+  ON l1.cust_id = l2.cust_id
+WHERE l1.level = 'EKYC'
+  AND l2.level = 'CREDIT_CHECK'
+  AND l1.status = 'COMPLETED'
+  AND l2.status = 'APPROVED';
+```
+🔐 Combined Critical Rule: Cross-Lifecycle Stage Mapping and Table JOIN
+
+✅ When to JOIN `customer_life_cycle_fed` and `loan_life_cycle_fed`:
+If a prompt includes stages from BOTH of the following categories:
+
+1. `loan_life_cycle_fed` stages:
+   - DEDUPE, NAME_AND_DOB, UN_CHECK, PENNY_DROP, CUSTOMER_UTILITY, CIF,
+     LOAN_ACCOUNT_CREATION, DISBURSEMENT, INSURANCE, FUND_TRANSFER, IMPS, LOAN_DISBURSED
+
+2. `customer_life_cycle_fed` stages:
+   - EKYC, DEMOGRAPHIC_DETAILS, INTERNAL_DEDUPE_CHECK, CREDIT_CHECK, HOUSEHOLD_DETAILS,
+     BANK_ACCOUNT_DETAILS, VO_VERIFICATION, GROUP_PHOTO_IND, INTERNAL_CPH, BANK_CPH,
+     CUSTOMER_DOCUMENT, CUSTOMER_GROUP_ESIGN, LEAD_APPLICANT_CONSENT, CO_APPLICANT_CONSENT,
+     CUSTOMER_INSURANCE, INSURANCE_POLICY
+
+→ Then a JOIN between `customer_life_cycle_fed` and `loan_life_cycle_fed` MUST be used.
+
+✅ Required JOIN:
+FROM staging_dashboard.customer_life_cycle_fed clf
+JOIN staging_dashboard.loan_life_cycle_fed llf 
+  ON clf.cust_id = llf.cust_id
+
+Additional Enforcement:
+- Use `source_created_at` for time comparisons (e.g., between stage transitions).
+- Only use `level` and `status` values that are valid and documented for each respective table.
+
+🚫 Strict Do-Nots:
+- DO NOT use stages from both sets in a single table.
+- DO NOT fabricate levels like `PASSED`, `DISBURSED`, `STARTED`, `REVIEWED`, etc.
+- DO NOT mismatch level and status—each must be validated against its own table's allowed values.
+
+🔒 Example Correction:
+Prompt: “How many customers moved from CREDIT_CHECK to DISBURSEMENT in 5 days”
+Correction:
+- Map CREDIT_CHECK to `customer_life_cycle_fed`, status = 'APPROVED'
+- Map DISBURSEMENT to `loan_life_cycle_fed`, status = 'SUCCESS'
+- JOIN both on `cust_id`
+- Use `source_created_at` for timestamp comparison
+
+📌 Summary:
+- Enforce exact stage-to-table mapping
+- JOIN on `cust_id` when lifecycle stages span both tables
+- Use only valid level-status combinations for WHERE conditions
+- This rule is STRICT and must be applied to all lifecycle table queries
+
+# Rule 7: Use `staging_dashboard.loan_renewal_customer_fed` only if the prompt involves **loan renewal** in the **disbursement** context.
+- If the user query mentions phrases like:
+  - "loan renewal"
+  - "renewed loan"
+  - "re-disbursement"
+  - "repeat loan disbursement"
+→ Then, and only then, include or reference the `loan_renewal_customer_fed` table.
+- For all other disbursement-related prompts (that do not mention renewal), **do not** consider this table.
