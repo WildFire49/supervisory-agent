@@ -222,3 +222,103 @@ WHERE level = 'bank account details';
 SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
 WHERE level = 'BANK_ACCOUNT_DETAILS';
 ```
+
+
+## AUTOMATED ENUM MAPPING RULES
+# Generated automatically by AutomatedEnumMappingGenerator
+# Generated at: 2025-08-14T12:51:06.315369
+
+
+### 🚨 CRITICAL Automated Enum Validation Rules:
+1. **Case Sensitivity**: All enum values MUST match exactly as stored in database
+2. **Exact Match**: Never use LIKE or partial matching for enum values  
+3. **Multi-Match Logic**: When user term could map to multiple enums, use OR conditions
+4. **Fuzzy Matching**: Apply intelligent mapping for common variations and synonyms
+5. **Validation**: Always validate enum exists before using in WHERE clause
+6. **Auto-Generated**: These rules were generated automatically - verify before production use
+
+### 📝 Example Auto-Generated Corrected Queries:
+```sql
+-- ❌ WRONG: User input taken literally
+SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
+WHERE level = 'bank account details';
+
+-- ✅ CORRECT: Apply automated enum mapping
+SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
+WHERE level = 'BANK_ACCOUNT_DETAILS';
+```
+
+
+## AUTOMATED ENUM MAPPING RULES
+# Generated automatically by AutomatedEnumMappingGenerator
+# Generated at: 2025-08-18T15:19:42.474667
+
+
+### 🚨 CRITICAL Automated Enum Validation Rules:
+1. **Case Sensitivity**: All enum values MUST match exactly as stored in database
+2. **Exact Match**: Never use LIKE or partial matching for enum values  
+3. **Multi-Match Logic**: When user term could map to multiple enums, use OR conditions
+4. **Fuzzy Matching**: Apply intelligent mapping for common variations and synonyms
+5. **Validation**: Always validate enum exists before using in WHERE clause
+6. **Auto-Generated**: These rules were generated automatically - verify before production use
+
+### 📝 Example Auto-Generated Corrected Queries:
+```sql
+-- ❌ WRONG: User input taken literally
+SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
+WHERE level = 'bank account details';
+
+-- ✅ CORRECT: Apply automated enum mapping
+SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
+WHERE level = 'BANK_ACCOUNT_DETAILS';
+```
+
+
+## AUTOMATED ENUM MAPPING RULES
+# Generated automatically by AutomatedEnumMappingGenerator
+# Generated at: 2025-08-18T16:36:49.375152
+
+
+### 🚨 CRITICAL Automated Enum Validation Rules:
+1. **Case Sensitivity**: All enum values MUST match exactly as stored in database
+2. **Exact Match**: Never use LIKE or partial matching for enum values  
+3. **Multi-Match Logic**: When user term could map to multiple enums, use OR conditions
+4. **Fuzzy Matching**: Apply intelligent mapping for common variations and synonyms
+5. **Validation**: Always validate enum exists before using in WHERE clause
+6. **Auto-Generated**: These rules were generated automatically - verify before production use
+
+### 📝 Example Auto-Generated Corrected Queries:
+```sql
+-- ❌ WRONG: User input taken literally
+SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
+WHERE level = 'bank account details';
+
+-- ✅ CORRECT: Apply automated enum mapping
+SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
+WHERE level = 'BANK_ACCOUNT_DETAILS';
+```
+
+
+## AUTOMATED ENUM MAPPING RULES
+# Generated automatically by AutomatedEnumMappingGenerator
+# Generated at: 2025-08-18T18:09:14.385968
+
+
+### 🚨 CRITICAL Automated Enum Validation Rules:
+1. **Case Sensitivity**: All enum values MUST match exactly as stored in database
+2. **Exact Match**: Never use LIKE or partial matching for enum values  
+3. **Multi-Match Logic**: When user term could map to multiple enums, use OR conditions
+4. **Fuzzy Matching**: Apply intelligent mapping for common variations and synonyms
+5. **Validation**: Always validate enum exists before using in WHERE clause
+6. **Auto-Generated**: These rules were generated automatically - verify before production use
+
+### 📝 Example Auto-Generated Corrected Queries:
+```sql
+-- ❌ WRONG: User input taken literally
+SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
+WHERE level = 'bank account details';
+
+-- ✅ CORRECT: Apply automated enum mapping
+SELECT COUNT(*) FROM staging_dashboard.customer_life_cycle_fed 
+WHERE level = 'BANK_ACCOUNT_DETAILS';
+```

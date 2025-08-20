@@ -16,12 +16,14 @@ if 'app.services.smart_vector_strategy' in sys.modules:
 import streamlit as st
 import sys
 import os
-import json
-import uuid
 import pandas as pd
+from datetime import datetime
 from pathlib import Path
-from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List, Tuple
+import uuid
+import json
+import asyncio
+import time
+from typing import Dict, List, Optional, Tuple, Any
 import logging
 
 # Add the app directory to the Python path
@@ -682,9 +684,39 @@ def get_available_connections(user_id: str = "vaishakh_configurator") -> Tuple[L
                 logger.info(f"✅ Found {len(connections)} database connections for user {user_id}")
                 return connections, None
             else:
-                error_msg = f"API error: {response.status_code} - {response.text}"
-                logger.error(f"❌ {error_msg}")
-                return [], error_msg
+                logger.warning(f"⚠️ API error: {response.status_code} - {response.text}")
+                logger.info("🔄 Falling back to direct database access...")
+                
+                # Fallback to direct database access
+                try:
+                    from app.agents.configurator.database_persistence import ConfiguratorDatabase
+                    import asyncio
+                    
+                    configurator_db = ConfiguratorDatabase()
+                    connections_data = asyncio.run(configurator_db.list_user_connections(user_id))
+                    
+                    # Convert to API format
+                    connections = [
+                        {
+                            'id': str(conn.id),
+                            'name': conn.name,
+                            'database_type': conn.database_type,
+                            'host': conn.host,
+                            'port': conn.port,
+                            'database_name': conn.database_name,
+                            'is_active': conn.is_active,
+                            'created_at': conn.created_at.isoformat() if conn.created_at else ""
+                        }
+                        for conn in connections_data
+                    ]
+                    
+                    logger.info(f"✅ Direct database access found {len(connections)} connections")
+                    return connections, None
+                    
+                except Exception as db_error:
+                    error_msg = f"Both API and direct database access failed. API: {response.status_code} - {response.text}, DB: {str(db_error)}"
+                    logger.error(f"❌ {error_msg}")
+                    return [], error_msg
                 
     except imports['httpx'].ConnectError as e:
         error_msg = "Cannot connect to API server. Make sure it's running on localhost:8000"
@@ -1063,6 +1095,250 @@ def update_template(template_id: str, template_data: Dict[str, Any]) -> Tuple[bo
     except Exception as e:
         return False, f"Error updating template: {str(e)}"
 
+def get_schema_analysis_for_template(connection_id: str) -> Dict[str, Any]:
+    """Retrieve comprehensive schema analysis from vector DB, database models, and session state for template editing"""
+    try:
+        schema_data = {
+            'tables_analysis': {},
+            'columns_analysis': {},
+            'vector_context': '',
+            'selected_tables': [],
+            'selected_columns': {},
+            'schema_metadata': {},
+            'database_analysis': {}
+        }
+        
+        # Try to get from session state first (most recent analysis)
+        if hasattr(st.session_state, 'analyzed_tables') and st.session_state.analyzed_tables:
+            schema_data['tables_analysis'] = st.session_state.analyzed_tables
+            
+        if hasattr(st.session_state, 'analyzed_columns') and st.session_state.analyzed_columns:
+            schema_data['columns_analysis'] = st.session_state.analyzed_columns
+            
+        if hasattr(st.session_state, 'selected_tables') and st.session_state.selected_tables:
+            schema_data['selected_tables'] = st.session_state.selected_tables
+            
+        if hasattr(st.session_state, 'selected_columns') and st.session_state.selected_columns:
+            schema_data['selected_columns'] = st.session_state.selected_columns
+        
+        # Try to get from database models (schema analysis results)
+        try:
+            imports = safe_import()
+            if imports['success'] and imports['db_available']:
+                with imports['SessionLocal']() as session:
+                    # Import schema analysis models
+                    from app.models.database.schema_analysis_models import (
+                        TableAnalysisModel, 
+                        SchemaAnalysisSessionModel
+                    )
+                    
+                    # Get the latest schema analysis session for this connection
+                    latest_session = session.query(SchemaAnalysisSessionModel).filter(
+                        SchemaAnalysisSessionModel.connection_id == uuid.UUID(connection_id)
+                    ).order_by(SchemaAnalysisSessionModel.started_at.desc()).first()
+                    
+                    if latest_session:
+                        # Get table analysis results for this session
+                        table_analyses = session.query(TableAnalysisModel).filter(
+                            TableAnalysisModel.session_id == latest_session.session_id
+                        ).all()
+                        
+                        # Process table analysis results
+                        db_tables_analysis = {}
+                        for table_analysis in table_analyses:
+                            table_name = table_analysis.table_name
+                            db_tables_analysis[table_name] = {
+                                'business_description': table_analysis.ai_business_description or table_analysis.inferred_business_purpose,
+                                'primary_purpose': table_analysis.primary_purpose,
+                                'data_category': table_analysis.data_category,
+                                'parent_tables': table_analysis.parent_tables or [],
+                                'child_tables': table_analysis.child_tables or [],
+                                'key_columns': table_analysis.key_columns or [],
+                                'business_processes': table_analysis.business_processes or [],
+                                'typical_queries': table_analysis.typical_queries or [],
+                                'join_patterns': table_analysis.join_patterns or [],
+                                'columns_info': table_analysis.columns_info or [],
+                                'row_count': table_analysis.row_count,
+                                'analyzed_at': table_analysis.analyzed_at
+                            }
+                        
+                        schema_data['database_analysis'] = {
+                            'session_info': {
+                                'session_id': latest_session.session_id,
+                                'database_type': latest_session.database_type,
+                                'database_name': latest_session.database_name,
+                                'total_tables': latest_session.total_tables_discovered,
+                                'total_relationships': latest_session.total_relationships_discovered,
+                                'analysis_summary': latest_session.analysis_summary,
+                                'started_at': latest_session.started_at,
+                                'completed_at': latest_session.completed_at
+                            },
+                            'tables': db_tables_analysis
+                        }
+                        
+                        # Merge database analysis with session state if session state is empty
+                        if not schema_data['tables_analysis'] and db_tables_analysis:
+                            schema_data['tables_analysis'] = db_tables_analysis
+                            
+        except Exception as e:
+            logger.warning(f"Could not retrieve database analysis: {e}")
+        
+        # Try to get from vector DB
+        try:
+            from app.agents.configurator.vector_storage import SchemaVectorStore
+            vector_store = SchemaVectorStore()
+            
+            # Get all schema context from vector DB
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            vector_context = loop.run_until_complete(
+                vector_store.get_all_schema_context(connection_id)
+            )
+            loop.close()
+            
+            if vector_context:
+                schema_data['vector_context'] = vector_context
+                
+        except Exception as e:
+            logger.warning(f"Could not retrieve vector context: {e}")
+        
+        return schema_data
+        
+    except Exception as e:
+        logger.error(f"Error retrieving schema analysis: {e}")
+        return {
+            'tables_analysis': {},
+            'columns_analysis': {},
+            'vector_context': '',
+            'selected_tables': [],
+            'selected_columns': {},
+            'schema_metadata': {},
+            'database_analysis': {}
+        }
+
+def format_schema_analysis_for_display(schema_data: Dict[str, Any]) -> str:
+    """Format schema analysis data for display in template edit view"""
+    try:
+        formatted_text = ""
+        
+        # Add database analysis session info if available
+        if schema_data.get('database_analysis') and schema_data['database_analysis'].get('session_info'):
+            session_info = schema_data['database_analysis']['session_info']
+            formatted_text += "=== DATABASE ANALYSIS SESSION ===\n"
+            formatted_text += f"Session ID: {session_info.get('session_id', 'Unknown')}\n"
+            formatted_text += f"Database Type: {session_info.get('database_type', 'Unknown')}\n"
+            formatted_text += f"Database Name: {session_info.get('database_name', 'Unknown')}\n"
+            formatted_text += f"Total Tables Discovered: {session_info.get('total_tables', 0)}\n"
+            formatted_text += f"Total Relationships: {session_info.get('total_relationships', 0)}\n"
+            if session_info.get('started_at'):
+                formatted_text += f"Analysis Started: {session_info['started_at']}\n"
+            if session_info.get('completed_at'):
+                formatted_text += f"Analysis Completed: {session_info['completed_at']}\n"
+            formatted_text += "\n"
+        
+        # Add vector context if available
+        if schema_data.get('vector_context'):
+            formatted_text += "=== VECTOR DB SCHEMA CONTEXT ===\n"
+            formatted_text += schema_data['vector_context'] + "\n\n"
+        
+        # Add database table analysis (from database models)
+        if schema_data.get('database_analysis') and schema_data['database_analysis'].get('tables'):
+            formatted_text += "=== DATABASE TABLE ANALYSIS ===\n"
+            for table_name, analysis in schema_data['database_analysis']['tables'].items():
+                formatted_text += f"\n** {table_name.upper()} **\n"
+                if isinstance(analysis, dict):
+                    if analysis.get('business_description'):
+                        formatted_text += f"Business Description: {analysis['business_description']}\n"
+                    if analysis.get('primary_purpose'):
+                        formatted_text += f"Primary Purpose: {analysis['primary_purpose']}\n"
+                    if analysis.get('data_category'):
+                        formatted_text += f"Data Category: {analysis['data_category']}\n"
+                    if analysis.get('row_count'):
+                        formatted_text += f"Row Count: {analysis['row_count']:,}\n"
+                    if analysis.get('key_columns'):
+                        formatted_text += f"Key Columns: {', '.join(analysis['key_columns'])}\n"
+                    if analysis.get('business_processes'):
+                        formatted_text += f"Business Processes: {', '.join(analysis['business_processes'])}\n"
+                    if analysis.get('parent_tables'):
+                        formatted_text += f"Parent Tables: {', '.join(analysis['parent_tables'])}\n"
+                    if analysis.get('child_tables'):
+                        formatted_text += f"Child Tables: {', '.join(analysis['child_tables'])}\n"
+                    if analysis.get('typical_queries'):
+                        formatted_text += f"Typical Queries: {'; '.join(analysis['typical_queries'][:3])}\n"
+                    if analysis.get('join_patterns'):
+                        formatted_text += f"Join Patterns: {'; '.join(analysis['join_patterns'][:3])}\n"
+                    
+                    # Add column information from database analysis
+                    if analysis.get('columns_info'):
+                        formatted_text += f"Columns ({len(analysis['columns_info'])}):\n"
+                        for col_info in analysis['columns_info'][:10]:  # Show first 10 columns
+                            if isinstance(col_info, dict):
+                                col_name = col_info.get('name', 'Unknown')
+                                col_type = col_info.get('type', 'Unknown')
+                                nullable = "NULL" if col_info.get('nullable', True) else "NOT NULL"
+                                formatted_text += f"  - {col_name}: {col_type} {nullable}\n"
+                        if len(analysis['columns_info']) > 10:
+                            formatted_text += f"  ... and {len(analysis['columns_info']) - 10} more columns\n"
+                formatted_text += "\n"
+        
+        # Add session state table analysis if different from database analysis
+        if schema_data.get('tables_analysis') and not schema_data.get('database_analysis'):
+            formatted_text += "=== SESSION TABLE ANALYSIS ===\n"
+            for table_name, analysis in schema_data['tables_analysis'].items():
+                formatted_text += f"\n** {table_name.upper()} **\n"
+                if isinstance(analysis, dict):
+                    if analysis.get('business_description'):
+                        formatted_text += f"Business Description: {analysis['business_description']}\n"
+                    if analysis.get('primary_purpose'):
+                        formatted_text += f"Primary Purpose: {analysis['primary_purpose']}\n"
+                    if analysis.get('data_category'):
+                        formatted_text += f"Data Category: {analysis['data_category']}\n"
+                    if analysis.get('user_notes'):
+                        formatted_text += f"User Notes: {analysis['user_notes']}\n"
+                    if analysis.get('business_rules'):
+                        formatted_text += f"Business Rules: {analysis['business_rules']}\n"
+                formatted_text += "\n"
+        
+        # Add column analysis with enums
+        if schema_data.get('columns_analysis'):
+            formatted_text += "=== COLUMN ANALYSIS & ENUMS ===\n"
+            for table_name, columns in schema_data['columns_analysis'].items():
+                formatted_text += f"\n** {table_name.upper()} COLUMNS **\n"
+                if isinstance(columns, dict):
+                    for col_name, col_analysis in columns.items():
+                        formatted_text += f"\n- {col_name}:\n"
+                        if isinstance(col_analysis, dict):
+                            if col_analysis.get('business_description'):
+                                formatted_text += f"  Description: {col_analysis['business_description']}\n"
+                            if col_analysis.get('category'):
+                                formatted_text += f"  Category: {col_analysis['category']}\n"
+                            if col_analysis.get('enum_values'):
+                                formatted_text += f"  Enum Values: {', '.join(col_analysis['enum_values'])}\n"
+                            if col_analysis.get('sample_values'):
+                                formatted_text += f"  Sample Values: {', '.join(col_analysis['sample_values'][:5])}\n"
+                            if col_analysis.get('user_notes'):
+                                formatted_text += f"  User Notes: {col_analysis['user_notes']}\n"
+                            if col_analysis.get('business_rules'):
+                                formatted_text += f"  Business Rules: {col_analysis['business_rules']}\n"
+        
+        # Add selected tables and columns info
+        if schema_data.get('selected_tables'):
+            formatted_text += f"\n=== SELECTED TABLES ===\n"
+            formatted_text += f"Tables: {', '.join(schema_data['selected_tables'])}\n"
+        
+        if schema_data.get('selected_columns'):
+            formatted_text += f"\n=== SELECTED COLUMNS ===\n"
+            for table, columns in schema_data['selected_columns'].items():
+                if columns:
+                    formatted_text += f"{table}: {', '.join(columns)}\n"
+        
+        return formatted_text if formatted_text else "No schema analysis data available. Please run schema discovery first."
+        
+    except Exception as e:
+        logger.error(f"Error formatting schema analysis: {e}")
+        return f"Error formatting schema analysis: {str(e)}"
+
 def delete_template(template_id: str) -> Tuple[bool, str]:
     """Delete a template from the database"""
     imports = safe_import()
@@ -1125,8 +1401,44 @@ def test_database_connection(connection_details: Dict[str, Any]) -> Tuple[bool, 
                 return result['success'], result['message']
             else:
                 error_text = response.text
-                logger.error(f"❌ Test API error {response.status_code}: {error_text}")
-                return False, f"API error: {response.status_code} - {error_text}"
+                logger.warning(f"⚠️ Test API error {response.status_code}: {error_text}")
+                logger.info("🔄 Falling back to direct database connection test...")
+                
+                # Fallback to direct database connection test
+                try:
+                    from urllib.parse import quote_plus
+                    from sqlalchemy import create_engine, text
+                    
+                    # Build connection string
+                    password_encoded = quote_plus(connection_details['password'])
+                    username_encoded = quote_plus(connection_details['username'])
+                    
+                    if connection_details['database_type'] == 'postgresql':
+                        connection_string = f"postgresql://{username_encoded}:{password_encoded}@{connection_details['host']}:{connection_details['port']}/{connection_details['database_name']}"
+                    elif connection_details['database_type'] == 'mysql':
+                        connection_string = f"mysql+pymysql://{username_encoded}:{password_encoded}@{connection_details['host']}:{connection_details['port']}/{connection_details['database_name']}"
+                    else:
+                        return False, f"Direct connection test not supported for {connection_details['database_type']}"
+                    
+                    # Test the connection
+                    logger.info(f"🔌 Testing direct database connection...")
+                    engine = create_engine(connection_string, pool_timeout=10, pool_recycle=300)
+                    
+                    with engine.connect() as conn:
+                        # Simple test query
+                        result = conn.execute(text("SELECT 1 as test"))
+                        test_value = result.fetchone()[0]
+                        
+                        if test_value == 1:
+                            logger.info(f"✅ Direct database connection test successful!")
+                            return True, "Connection successful (direct database test)"
+                        else:
+                            return False, "Direct database test failed - unexpected result"
+                            
+                except Exception as db_error:
+                    error_msg = f"Both API and direct database test failed. API: {response.status_code} - {error_text}, DB: {str(db_error)}"
+                    logger.error(f"❌ {error_msg}")
+                    return False, error_msg
                 
     except imports['httpx'].ConnectError as e:
         logger.error(f"🌐 Connection error during test: {str(e)}")
@@ -1163,7 +1475,60 @@ def create_database_connection(connection_details: Dict[str, Any], user_id: str 
                 result = response.json()
                 return True, "Connection created successfully", result['connection_id']
             else:
-                return False, f"API error: {response.status_code} - {response.text}", None
+                imports['logger'].warning(f"⚠️ API error: {response.status_code} - {response.text}")
+                imports['logger'].info("🔄 Falling back to direct database creation...")
+                
+                # Fallback to direct database creation
+                try:
+                    from app.agents.configurator.database_persistence import ConfiguratorDatabase
+                    from app.agents.configurator.models import DatabaseConnection, DatabaseType
+                    import asyncio
+                    import uuid
+                    from datetime import datetime, timezone
+                    
+                    configurator_db = ConfiguratorDatabase()
+                    
+                    # Create database connection object
+                    connection_id = str(uuid.uuid4())
+                    
+                    # Map database type string to enum
+                    db_type_mapping = {
+                        'postgresql': DatabaseType.POSTGRESQL,
+                        'mysql': DatabaseType.MYSQL,
+                        'sqlite': DatabaseType.SQLITE,
+                        'oracle': DatabaseType.ORACLE,
+                        'mssql': DatabaseType.MSSQL,
+                        'mongodb': DatabaseType.MONGODB
+                    }
+                    
+                    db_type = db_type_mapping.get(connection_details['database_type'], DatabaseType.POSTGRESQL)
+                    
+                    db_connection = DatabaseConnection(
+                        id=connection_id,
+                        name=connection_details['name'],
+                        database_type=db_type,
+                        host=connection_details['host'],
+                        port=connection_details['port'],
+                        database_name=connection_details['database_name'],
+                        username=connection_details['username'],
+                        password=connection_details['password'],
+                        ssl_enabled=connection_details.get('ssl_enabled', False),
+                        connection_params=connection_details.get('connection_params', {}),
+                        is_active=True,
+                        created_by=user_id,
+                        created_at=datetime.now(timezone.utc)
+                    )
+                    
+                    # Save to database directly
+                    saved_connection = asyncio.run(configurator_db.create_database_connection(user_id, db_connection))
+                    
+                    imports['logger'].info(f"✅ Direct database creation successful: {connection_id}")
+                    return True, "Connection created successfully (direct database)", connection_id
+                    
+                except Exception as db_error:
+                    error_msg = f"Both API and direct database creation failed. API: {response.status_code} - {response.text}, DB: {str(db_error)}"
+                    imports['logger'].error(f"❌ {error_msg}")
+                    return False, error_msg, None
                 
     except imports['httpx'].ConnectError:
         return False, "Cannot connect to API server. Make sure it's running on localhost:8000", None
@@ -1661,6 +2026,54 @@ with tab2:
     with mgmt_tab1:
         st.subheader("➕ Create New Template")
         
+        # Schema Analysis Loading (Outside Form)
+        st.markdown("### 🔍 Schema Analysis Helper")
+        auto_populate_col1, auto_populate_col2 = st.columns([3, 1])
+        with auto_populate_col1:
+            st.markdown("**Load schema analysis data to auto-populate template fields**")
+        with auto_populate_col2:
+            load_schema_connection_id = st.text_input(
+                "Connection ID for Schema",
+                placeholder="Enter connection UUID",
+                help="Enter connection ID to load schema analysis",
+                key="load_schema_conn_id"
+            )
+        
+        load_col1, load_col2 = st.columns([1, 1])
+        with load_col1:
+            if st.button("🤖 Load Schema Analysis", help="Load schema analysis for this connection"):
+                if load_schema_connection_id.strip():
+                    with st.spinner("Loading schema analysis..."):
+                        schema_data = get_schema_analysis_for_template(load_schema_connection_id.strip())
+                        st.session_state.create_template_schema_data = schema_data
+                        if schema_data.get('vector_context') or schema_data.get('tables_analysis') or schema_data.get('columns_analysis'):
+                            st.success("✅ Schema analysis loaded!")
+                        else:
+                            st.warning("⚠️ No schema analysis found for this connection")
+                else:
+                    st.error("❌ Please enter a connection ID first")
+        
+        with load_col2:
+            if hasattr(st.session_state, 'create_template_schema_data') and st.session_state.create_template_schema_data:
+                if st.button("📋 Use Schema Analysis", help="Auto-populate schema context with loaded analysis"):
+                    st.session_state.auto_populate_schema = format_schema_analysis_for_display(st.session_state.create_template_schema_data)
+                    st.success("✅ Schema context will be auto-populated in form below")
+                    st.rerun()
+        
+        # Display schema analysis if available
+        if hasattr(st.session_state, 'create_template_schema_data') and st.session_state.create_template_schema_data:
+            with st.expander("📊 Available Schema Analysis", expanded=False):
+                schema_display = format_schema_analysis_for_display(st.session_state.create_template_schema_data)
+                st.text_area(
+                    "Schema Analysis Preview",
+                    value=schema_display[:1000] + "..." if len(schema_display) > 1000 else schema_display,
+                    height=200,
+                    disabled=True,
+                    help="Preview of available schema analysis data"
+                )
+        
+        st.markdown("---")
+        
         with st.form("create_template_form"):
             # Basic template information
             col1, col2 = st.columns(2)
@@ -1680,6 +2093,7 @@ with tab2:
                 
                 connection_id = st.text_input(
                     "Connection ID *",
+                    value=load_schema_connection_id if 'load_schema_connection_id' in locals() else "",
                     placeholder="Enter connection UUID",
                     help="UUID of the database connection this template will use"
                 )
@@ -1724,6 +2138,7 @@ with tab2:
             st.markdown('<div class="large-textarea">', unsafe_allow_html=True)
             schema_context = st.text_area(
                 "Schema Context Template *",
+                value=st.session_state.get('auto_populate_schema', ''),
                 height=350,
                 placeholder="""# Database Schema Context
 
@@ -1896,6 +2311,40 @@ with tab2:
             
             template = st.session_state.editing_template
             
+            # Load schema analysis data for this template
+            if st.button("🔄 Load Schema Analysis", help="Retrieve schema analysis and vector DB data for this template"):
+                with st.spinner("Loading schema analysis from vector DB..."):
+                    schema_data = get_schema_analysis_for_template(template['connection_id'])
+                    st.session_state.template_schema_data = schema_data
+                    if schema_data.get('vector_context') or schema_data.get('tables_analysis') or schema_data.get('columns_analysis'):
+                        st.success("✅ Schema analysis loaded successfully!")
+                    else:
+                        st.warning("⚠️ No schema analysis found. Please run schema discovery first.")
+            
+            # Display schema analysis if available
+            if hasattr(st.session_state, 'template_schema_data') and st.session_state.template_schema_data:
+                with st.expander("📊 Schema Analysis & Vector DB Data", expanded=False):
+                    schema_display = format_schema_analysis_for_display(st.session_state.template_schema_data)
+                    st.text_area(
+                        "Schema Analysis (Read-only)",
+                        value=schema_display,
+                        height=300,
+                        disabled=True,
+                        help="This shows the schema analysis and vector DB data for reference"
+                    )
+                    
+                    # Show schema statistics
+                    schema_stats_col1, schema_stats_col2, schema_stats_col3 = st.columns(3)
+                    with schema_stats_col1:
+                        tables_count = len(st.session_state.template_schema_data.get('tables_analysis', {}))
+                        st.metric("Tables Analyzed", tables_count)
+                    with schema_stats_col2:
+                        columns_count = sum(len(cols) for cols in st.session_state.template_schema_data.get('columns_analysis', {}).values())
+                        st.metric("Columns Analyzed", columns_count)
+                    with schema_stats_col3:
+                        vector_available = "Yes" if st.session_state.template_schema_data.get('vector_context') else "No"
+                        st.metric("Vector DB Data", vector_available)
+            
             with st.form("edit_template_form"):
                 # Basic template information
                 edit_col1, edit_col2 = st.columns(2)
@@ -1928,8 +2377,16 @@ with tab2:
                         help="Business domain for better context understanding"
                     )
                 
-                # Template content
+                # Template content with enhanced pre-population
                 st.markdown("### Template Content")
+                
+                # Auto-populate button
+                if hasattr(st.session_state, 'template_schema_data') and st.session_state.template_schema_data:
+                    if st.form_submit_button("🤖 Auto-Populate from Schema Analysis", help="Fill template fields with schema analysis data"):
+                        # Auto-populate schema context with analysis data
+                        schema_display = format_schema_analysis_for_display(st.session_state.template_schema_data)
+                        template['schema_context_template'] = schema_display
+                        st.rerun()
                 
                 st.markdown('<div class="large-textarea">', unsafe_allow_html=True)
                 edit_business_rules = st.text_area(
@@ -2082,15 +2539,20 @@ with tab3:
                 
                 with edit_conn_col2:
                     if st.button(f"🔬 Edit Schema", key=f"edit_schema_{conn.get('id', i)}", help="Edit schema discovery for this connection"):
-                        # Set up for schema editing
-                        st.session_state.db_connection_id = conn.get('id')
+                        # Set up for schema editing with proper connection persistence
+                        connection_id = conn.get('id')
+                        st.session_state.db_connection_id = connection_id
+                        st.session_state.connection_id = connection_id  # Also store as connection_id
                         st.session_state.db_connection_details = {
                             'host': conn.get('host', ''),
                             'port': conn.get('port', 5432),
                             'database': conn.get('database', conn.get('database_name', '')),
+                            'database_name': conn.get('database', conn.get('database_name', '')),  # Store both keys
                             'username': conn.get('username', ''),
                             'password': conn.get('password', ''),  # May need to re-enter
-                            'database_type': conn.get('database_type', 'postgresql')
+                            'database_type': conn.get('database_type', 'postgresql'),
+                            'ssl_enabled': conn.get('ssl_enabled', False),
+                            'connection_params': conn.get('connection_params', {})
                         }
                         st.session_state.db_config_step = 'schema'
                         st.session_state.edit_mode = True
@@ -2237,7 +2699,9 @@ with tab3:
                         success, message, connection_id = create_database_connection(connection_details)
                         if success:
                             st.success(f"✅ {message}")
+                            # Store connection details in multiple session state keys for compatibility
                             st.session_state.db_connection_id = connection_id
+                            st.session_state.connection_id = connection_id  # Also store as connection_id
                             st.session_state.db_connection_details = connection_details  # Store for direct access
                             st.session_state.db_config_step = 'schema'
                             st.rerun()
@@ -2263,6 +2727,9 @@ with tab3:
                     if success:
                         st.success(f"Schema discovered: {message}")
                         st.session_state.db_schema_data = schema_data
+                        # Ensure connection details persist to next step
+                        if 'db_connection_id' in st.session_state:
+                            st.session_state.connection_id = st.session_state.db_connection_id
                         st.session_state.db_config_step = 'columns'
                         st.rerun()
                     else:
@@ -2360,6 +2827,238 @@ with tab3:
                     st.markdown("**📋 Tables Selected for Template:**")
                     for table_key in st.session_state.selected_tables_for_storage:
                         st.write(f"✓ {table_key}")
+                    
+                    # Comprehensive One-Stop Analysis Button
+                    st.markdown("---")
+                    st.markdown("**🚀 One-Stop Solution**")
+                    
+                    if st.button("🎯 Generate Comprehensive Database Template", 
+                                type="primary", 
+                                help="Analyze all selected tables, generate business & schema descriptions, create unified template, and embed in vector DB"):
+                        
+                        if st.session_state.get('selected_tables_for_storage') and len(st.session_state.selected_tables_for_storage) > 0:
+                            with st.spinner("🔄 Generating comprehensive database template... This may take 2-3 minutes."):
+                                try:
+                                    # Import required modules
+                                    from app.services.advanced_schema_analyzer import create_schema_analyzer
+                                    from app.models.database.schema_analysis_models import TableAnalysisModel
+                                    from app.core.database import SessionLocal
+                                    import json
+                                    from datetime import datetime
+                                    
+                                    logger.info("Starting template generation from database analysis data")
+                                    
+                                    # Initialize template content sections
+                                    business_rules_content = []
+                                    schema_context_content = []
+                                    domain_specific_content = []
+                                    
+                                    # Get database connection details
+                                    connection_id = st.session_state.get('connection_id')
+                                    database_name = st.session_state.db_connection_details.get('database_name', 'Unknown')
+                                    schemas_analyzed = list(set([table_key.split('.')[0] for table_key in st.session_state.selected_tables_for_storage]))
+                                    
+                                    logger.info(f"Generating template for {len(st.session_state.selected_tables_for_storage)} tables from database: {database_name}")
+                                    
+                                    # Generate domain-specific prompts (financial domain focus)
+                                    domain_specific_content.append(f"""
+# Domain-Specific Prompts for Financial Services
+
+## Financial Domain Context
+This database contains financial services data with focus on loan management, disbursements, and customer lifecycle management.
+
+## Query Guidelines for Financial Data
+- Always consider regulatory compliance requirements
+- Use appropriate date filtering for financial reporting periods
+- Handle monetary amounts with proper precision (use ROUND function for PostgreSQL)
+- Consider loan lifecycle stages when querying disbursement vs collection data
+- Apply proper data governance rules for sensitive financial information
+
+## Business Process Context
+- **Loan Origination**: Customer onboarding, application processing, approval workflows
+- **Disbursement Management**: Fund release, payment processing, transaction tracking
+- **Collection Operations**: Payment collection, overdue management, recovery processes
+- **Customer Lifecycle**: Account management, relationship tracking, service delivery
+
+## Query Best Practices
+- Use indexed columns for joins and filtering
+- Filter by date ranges for performance optimization
+- Aggregate monetary amounts carefully with proper rounding
+- Consider data quality and completeness in financial calculations
+""")
+                                    
+                                    # Generate business rules and schema context from database
+                                    with SessionLocal() as db_session:
+                                        for table_key in st.session_state.selected_tables_for_storage:
+                                            schema_name, table_name = table_key.split('.', 1)
+                                            
+                                            # Get latest analysis for this table from database
+                                            db_analysis = db_session.query(TableAnalysisModel).filter_by(
+                                                connection_id=connection_id,
+                                                schema_name=schema_name,
+                                                table_name=table_name
+                                            ).order_by(TableAnalysisModel.analyzed_at.desc()).first()
+                                            
+                                            if db_analysis:
+                                                logger.info(f"Processing database analysis for table: {table_key}")
+                                                
+                                                # Extract analysis data
+                                                primary_purpose = db_analysis.primary_purpose or 'Not specified'
+                                                business_description = db_analysis.ai_business_description or 'No description available'
+                                                key_columns = db_analysis.key_columns or []
+                                                business_processes = db_analysis.business_processes or []
+                                                primary_keys = db_analysis.primary_keys or []
+                                                foreign_keys = db_analysis.foreign_keys or []
+                                                columns_analysis = db_analysis.columns_analysis or []
+                                                
+                                                # Generate business rules section
+                                                business_rules_content.append(f"""
+## Table: {table_name} ({schema_name} schema)
+
+### Business Context
+**Primary Purpose**: {primary_purpose}
+**Business Description**: {business_description}
+**Row Count**: {db_analysis.row_count:,} rows
+**Analysis Confidence**: {db_analysis.analysis_confidence:.1%}
+
+### Key Business Information
+**Key Columns**: {', '.join(key_columns) if key_columns else 'None identified'}
+**Business Processes**: {', '.join(business_processes) if business_processes else 'None identified'}
+**Data Category**: {db_analysis.data_category or 'Not specified'}
+
+### Data Governance
+**Primary Keys**: {', '.join(primary_keys) if primary_keys else 'None identified'}
+**Foreign Keys**: {len(foreign_keys)} relationships identified
+**Data Quality Score**: {db_analysis.analysis_confidence:.1%}
+
+### Column Analysis
+""")
+                                                                                        # Add detailed column analysis
+                                                if columns_analysis:
+                                                    for col_data in columns_analysis:
+                                                        col_name = col_data.get('column_name', 'Unknown')
+                                                        data_type = col_data.get('data_type', 'Unknown')
+                                                        business_desc = col_data.get('business_description', 'No description')
+                                                        is_primary_key = col_data.get('is_primary_key', False)
+                                                        foreign_key_target = col_data.get('foreign_key_target', None)
+                                                        enum_values = col_data.get('enum_values', [])
+                                                        
+                                                        business_rules_content.append(f"""
+**{col_name}** ({data_type}):
+- Purpose: {business_desc}
+- Type: {'Primary Key' if is_primary_key else f'Foreign Key → {foreign_key_target}' if foreign_key_target else 'Data Column'}
+- Categorical Values: {len(enum_values)} options available
+""")
+                                                
+                                                # Generate schema context section
+                                                schema_context_content.append(f"""
+### Table: {table_name} ({schema_name})
+
+**Technical Specifications**:
+- Row Count: {db_analysis.row_count:,}
+- Column Count: {db_analysis.column_count}
+- Table Type: {db_analysis.table_type or 'Standard'}
+- Storage Size: {db_analysis.size_bytes or 'Unknown'} bytes
+
+**Relationships**:
+- Primary Keys: {', '.join(primary_keys) if primary_keys else 'None'}
+- Foreign Keys: {len(foreign_keys)} relationships
+- Parent Tables: {', '.join(db_analysis.parent_tables or [])}
+- Child Tables: {', '.join(db_analysis.child_tables or [])}
+
+**Query Optimization**:
+- Indexed Columns: Primary keys and foreign keys
+- Join Performance: {'Optimized' if primary_keys else 'Consider adding indexes'}
+- Query Pattern: {'OLTP' if db_analysis.row_count < 1000000 else 'OLAP'} optimized
+- Query Complexity: {'Low' if db_analysis.row_count < 100000 else 'High'}
+""")
+                                            else:
+                                                logger.warning(f"No database analysis found for {table_key}")
+                                                business_rules_content.append(f"""
+## Table: {table_name} ({schema_name} schema)
+**Status**: Analysis not found in database - please re-analyze this table
+""")
+                                                schema_context_content.append(f"""
+### Table: {table_name} ({schema_name})
+**Status**: Analysis not found in database - please re-analyze this table
+""")
+                                    
+                                    # Combine all sections
+                                    unified_business_rules = '\n'.join(business_rules_content)
+                                    unified_schema_context = '\n'.join(schema_context_content)
+                                    unified_domain_prompts = '\n'.join(domain_specific_content)
+                                
+                                    # Store in session state with organized template categories
+                                    st.session_state.comprehensive_template = {
+                                        'business_rules': unified_business_rules,
+                                        'schema_context': unified_schema_context,
+                                        'domain_prompts': unified_domain_prompts,
+                                        'tables_analyzed': len(st.session_state.selected_tables_for_storage),
+                                        'database_name': database_name,
+                                        'schemas': schemas_analyzed,
+                                        'generated_at': datetime.now(datetime.timezone.utc).isoformat(),
+                                        'version': '3.0-production',
+                                        'embedding_optimized': True,
+                                        'query_generation_ready': True
+                                    }
+                                    
+                                    logger.info(f"Template generation completed with {len(business_rules_content)} business rules sections, {len(schema_context_content)} schema sections, and {len(domain_specific_content)} domain sections")
+                                    
+                                    # Mark template generation as complete
+                                    st.session_state.template_generation_complete = True
+                                    
+                                    # Show success message
+                                    st.success(f"Template generation completed successfully! Generated {len(business_rules_content)} business rules sections, {len(schema_context_content)} schema sections, and {len(domain_specific_content)} domain sections.")
+                                    
+                                    logger.info("Template generation completed successfully")
+                            
+                                except Exception as e:
+                                    logger.error(f"Error during template generation: {str(e)}")
+                                    st.error(f"Template generation failed: {str(e)}")
+                                    st.session_state.template_generation_complete = False
+                        
+                        else:
+                            st.error("No tables selected for template generation")
+                            logger.error("Template generation attempted with no selected tables")
+                    
+                    else:
+                        st.warning("Please complete database connection and table selection first")
+                        logger.warning("Template generation attempted without proper setup")
+                    
+                    # Display Generated Template if Available
+                    if 'comprehensive_template' in st.session_state:
+                        st.markdown("---")
+                        st.markdown("## Generated Template")
+                        
+                        template_data = st.session_state.comprehensive_template
+                        
+                        # Template preview tabs
+                        tab1, tab2, tab3 = st.tabs(["Business Rules", "Schema Context", "Domain Prompts"])
+                        
+                        with tab1:
+                            st.text_area(
+                                "Business Rules:",
+                                value=template_data.get('business_rules', 'No business rules generated'),
+                                height=300,
+                                disabled=True
+                            )
+                        
+                        with tab2:
+                            st.text_area(
+                                "Schema Context:",
+                                value=template_data.get('schema_context', 'No schema context generated'),
+                                height=300,
+                                disabled=True
+                            )
+                        
+                        with tab3:
+                            st.text_area(
+                                "Domain Prompts:",
+                                value=template_data.get('domain_prompts', 'No domain prompts generated'),
+                                height=300,
+                                disabled=True
+                            )
+                    
                     st.markdown("---")
                 
                 # Table selection dropdown with current selection shown
@@ -2391,51 +3090,162 @@ with tab3:
                         'table_key': table_key
                     }
                     
-                    # On-demand table analysis button
-                    if st.button(f"🔬 Analyze Table: {table_name}", type="primary"):
-                        with st.spinner(f"AI is analyzing table {table_name}... This may take 10-15 seconds."):
-                            # Import and use the advanced analyzer
+                    # Cache status display
+                    if 'db_connection_id' in st.session_state or 'connection_id' in st.session_state:
+                        connection_id = st.session_state.get('connection_id') or st.session_state.get('db_connection_id')
+                        if connection_id:
                             try:
-                                from app.services.advanced_schema_analyzer import create_schema_analyzer
-                                import asyncio
+                                from app.services.table_analysis_cache import table_analysis_cache
+                                cache_stats = table_analysis_cache.get_cache_stats(connection_id)
+                                if 'error' not in cache_stats:
+                                    st.info(f"📊 **Cache Status**: {cache_stats['valid_cached']} valid, {cache_stats['expired_cached']} expired, {cache_stats['total_cached']} total cached analyses")
+                            except Exception as e:
+                                st.warning(f"Cache status unavailable: {e}")
+                    
+                    # On-demand table analysis button with cache integration
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        analyze_button = st.button(f"🔬 Analyze Table: {table_name}", type="primary")
+                    with col2:
+                        force_refresh = st.button("🔄 Force Refresh", help="Skip cache and force new analysis")
+                    
+                    if analyze_button or force_refresh:
+                        # Check cache first (unless force refresh)
+                        cached_analysis = None
+                        connection_id = st.session_state.get('connection_id') or st.session_state.get('db_connection_id')
+                        
+                        if not force_refresh and connection_id:
+                            try:
+                                from app.services.table_analysis_cache import table_analysis_cache
+                                cached_analysis = table_analysis_cache.get_cached_analysis(
+                                    connection_id, schema_name, table_name
+                                )
+                                if cached_analysis:
+                                    st.success(f"✅ Loaded cached analysis for {table_name} (saves 1-2 minutes!)")
+                            except Exception as e:
+                                st.warning(f"Cache lookup failed: {e}")
+                        
+                        if cached_analysis:
+                            # Use cached analysis
+                            st.session_state.table_analyses[table_key] = {
+                                'business_description': cached_analysis.business_description,
+                                'primary_purpose': cached_analysis.primary_purpose,
+                                'data_category': cached_analysis.data_category,
+                                'parent_tables': cached_analysis.parent_tables or [],
+                                'child_tables': cached_analysis.child_tables or [],
+                                'key_columns': cached_analysis.key_columns or [],
+                                'business_processes': cached_analysis.business_processes or [],
+                                'typical_queries': cached_analysis.typical_queries or [],
+                                'join_patterns': cached_analysis.join_patterns or [],
+                                'columns': cached_analysis.columns or [],
+                                'row_count': cached_analysis.row_count,
+                                'confidence_score': cached_analysis.confidence_score,
+                                'analysis_source': 'cache',
+                                'user_notes': getattr(cached_analysis, 'user_notes', ''),
+                                'business_rules': getattr(cached_analysis, 'business_rules', ''),
+                                'usage_context': getattr(cached_analysis, 'usage_context', ''),
+                                'analyzed_at': cached_analysis.analyzed_at.isoformat() if hasattr(cached_analysis, 'analyzed_at') and cached_analysis.analyzed_at else None
+                            }
+                            st.rerun()
+                        else:
+                            # Perform new analysis
+                            analysis_start_time = time.time()
+                            with st.spinner(f"AI is analyzing table {table_name}... This may take 1-2 minutes."):
+                                # Import and use the advanced analyzer
+                                try:
+                                    from app.services.advanced_schema_analyzer import create_schema_analyzer
+                                    import asyncio
+                                    import time
+                                    
+                                    analyzer = create_schema_analyzer()
+                                    
+                                    # Run async analysis in sync context
+                                    loop = asyncio.new_event_loop()
+                                    asyncio.set_event_loop(loop)
                                 
-                                analyzer = create_schema_analyzer()
-                                
-                                # Run async analysis in sync context
-                                loop = asyncio.new_event_loop()
-                                asyncio.set_event_loop(loop)
-                                
-                                analysis = loop.run_until_complete(
-                                    analyzer.analyze_table_on_demand(
-                                        st.session_state.db_connection_details,
-                                        table_name,
+                                    analysis = loop.run_until_complete(
+                                        analyzer.analyze_table_on_demand(
+                                            st.session_state.db_connection_details,
+                                            table_name,
                                         schema_name
                                     )
                                 )
                                 
-                                loop.close()
-                                
-                                # Store analysis
-                                st.session_state.table_analyses[table_key] = {
-                                    'business_description': analysis.business_description,
-                                    'primary_purpose': analysis.primary_purpose,
-                                    'data_category': analysis.data_category,
-                                    'parent_tables': analysis.parent_tables or [],
-                                    'child_tables': analysis.child_tables or [],
-                                    'typical_queries': analysis.typical_queries or [],
-                                    'join_patterns': analysis.join_patterns or [],
-                                    'user_notes': '',
-                                    'business_rules': '',
-                                    'usage_context': '',
-                                    'confidence_score': analysis.confidence_score,
-                                    'analyzed_at': analysis.analyzed_at.isoformat() if analysis.analyzed_at else None
-                                }
-                                
-                                st.success(f"✓ Table analysis complete! Confidence: {analysis.confidence_score:.1%}")
-                                st.rerun()
-                                
-                            except Exception as e:
-                                st.error(f"✗ Analysis failed: {str(e)}")
+                                    loop.close()
+                                    
+                                    analysis_duration_ms = (time.time() - analysis_start_time) * 1000
+                                    
+                                    if analysis:
+                                        # Store analysis in session state
+                                        st.session_state.table_analyses[table_key] = {
+                                            'business_description': analysis.business_description,
+                                            'primary_purpose': analysis.primary_purpose,
+                                            'data_category': analysis.data_category,
+                                            'parent_tables': analysis.parent_tables or [],
+                                            'child_tables': analysis.child_tables or [],
+                                            'key_columns': analysis.key_columns or [],
+                                            'business_processes': analysis.business_processes or [],
+                                            'typical_queries': analysis.typical_queries or [],
+                                            'join_patterns': analysis.join_patterns or [],
+                                            'columns': analysis.columns or [],
+                                            'row_count': analysis.row_count,
+                                            'confidence_score': analysis.confidence_score,
+                                            'analysis_source': 'fresh',
+                                            'analysis_duration_ms': analysis_duration_ms,
+                                            'user_notes': analysis.user_notes or '',
+                                            'business_rules': analysis.business_rules or '',
+                                            'usage_context': analysis.usage_context or '',
+                                            'analyzed_at': analysis.analyzed_at.isoformat() if analysis.analyzed_at else None
+                                        }
+                                        
+                                        # Ensure sample_data is initialized if missing
+                                        if not hasattr(analysis, 'sample_data') or analysis.sample_data is None:
+                                            analysis.sample_data = []
+                                        
+                                        # Save to database for persistence
+                                        if connection_id:
+                                            try:
+                                                from app.services.table_analysis_cache import table_analysis_cache
+                                                
+                                                # Get table metadata for schema hash
+                                                table_metadata = {
+                                                    'table_name': table_name,
+                                                    'schema_name': schema_name,
+                                                    'columns': [
+                                                        {
+                                                            'name': col.column_name,
+                                                            'type': col.data_type,
+                                                            'nullable': col.is_nullable,
+                                                            'primary_key': False  # Default
+                                                        }
+                                                        for col in (analysis.columns or [])
+                                                    ]
+                                                }
+                                                
+                                                # Save to database
+                                                save_success = table_analysis_cache.save_analysis(
+                                                    connection_id, analysis, table_metadata, analysis_duration_ms
+                                                )
+                                                
+                                                if save_success:
+                                                    st.success(f"✅ Analysis completed for {table_name} and saved to database! (took {analysis_duration_ms:.0f}ms)")
+                                                else:
+                                                    st.warning(f"⚠️ Analysis completed for {table_name} but database save failed! (took {analysis_duration_ms:.0f}ms)")
+                                                    
+                                            except Exception as cache_error:
+                                                st.error(f"❌ Database save error for {table_name}: {str(cache_error)}")
+                                                st.success(f"✅ Analysis completed for {table_name} (in memory only) - took {analysis_duration_ms:.0f}ms")
+                                        else:
+                                            st.warning(f"⚠️ Analysis completed for {table_name} but no connection_id for database save!")
+                                        
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ Analysis failed - no results returned")
+                                        
+                                except Exception as e:
+                                    st.error(f"❌ Analysis failed: {str(e)}")
+                                    import traceback
+                                    st.error(f"Error details: {traceback.format_exc()}")
                     
                     # Table selection checkbox for storage
                     table_selected_for_storage = st.checkbox(
@@ -2457,15 +3267,55 @@ with tab3:
                         
                         st.markdown("**📈 Table Analysis Results**")
                         
-                        # Editable description
-                        with st.expander("📝 Business Description (Editable)", expanded=True):
+                        # Editable description - Always expanded with full text display
+                        with st.expander("📝 Business Description (LLM-Optimized for Query Generation)", expanded=True):
+                            # Show full description with proper formatting
+                            st.markdown("**AI-Generated Description (Optimized for LLM Query Generation):**")
                             edited_description = st.text_area(
-                                "AI-Generated Description:",
+                                "Description for Analysis",
                                 value=analysis['business_description'],
-                                height=100,
-                                help="Edit this AI-generated description",
+                                height=250,  # Increased height to show full text
+                                help="This description is optimized for LLM query generation with detailed enum values and column context",
                                 key=f"table_desc_{table_key}"
                             )
+                            
+                            # Show column count and enum information
+                            if 'columns' in analysis and analysis['columns']:
+                                col_count = len(analysis['columns'])
+                                # Handle both dict and ColumnAnalysis object formats
+                                enum_cols = []
+                                for col in analysis['columns']:
+                                    if hasattr(col, 'enum_values'):  # ColumnAnalysis object
+                                        if col.enum_values:
+                                            enum_cols.append(col)
+                                    elif isinstance(col, dict) and col.get('enum_values_explicit'):  # Dict format
+                                        enum_cols.append(col)
+                                analysis_source = analysis.get('analysis_source', 'unknown')
+                                duration_info = ""
+                                if 'analysis_duration_ms' in analysis:
+                                    duration_info = f" | Analysis time: {analysis['analysis_duration_ms']:.0f}ms"
+                                cache_indicator = "🔄 Fresh" if analysis_source == 'fresh' else "💾 Cached"
+                                st.info(f"📊 **Analysis Summary:** {col_count} columns analyzed | {len(enum_cols)} enum columns detected | {cache_indicator}{duration_info}")
+                                
+                                # Show all enum columns summary
+                                if enum_cols:
+                                    st.markdown("**🎯 Enum Columns for Query Generation:**")
+                                    for col in enum_cols:  # Show ALL enum columns
+                                        # Handle both ColumnAnalysis objects and dict formats
+                                        if hasattr(col, 'enum_values'):  # ColumnAnalysis object
+                                            column_name = col.column_name
+                                            enum_values = col.enum_values or []
+                                            sample_values = col.sample_values or []
+                                        else:  # Dict format
+                                            column_name = col.get('column_name', 'Unknown')
+                                            enum_values = col.get('enum_values_explicit', [])
+                                            sample_values = col.get('distinct_values_sample', [])
+                                        
+                                        if enum_values:
+                                            st.markdown(f"- **{column_name}**: {', '.join(enum_values[:8])}{'...' if len(enum_values) > 8 else ''}")
+                                        elif sample_values:
+                                            # Show categorical columns with distinct values
+                                            st.markdown(f"- **{column_name}** (categorical): {', '.join(sample_values[:5])}{'...' if len(sample_values) > 5 else ''}")
                             
                             if edited_description != analysis['business_description']:
                                 st.session_state.table_analyses[table_key]['business_description'] = edited_description
@@ -2718,16 +3568,22 @@ with tab3:
         with enum_col1:
             if st.button("🤖 Generate Enum Mappings", type="primary", disabled=st.session_state.enum_mapping_status == 'running'):
                 # Improved validation with detailed error messages
-                connection_id = st.session_state.get('connection_id')
+                connection_id = st.session_state.get('connection_id') or st.session_state.get('db_connection_id')
+                connection_details = st.session_state.get('db_connection_details')
                 
                 if not connection_id:
                     st.error("❌ No database connection found. Please go back to Schema Discovery and connect to your database.")
+                    st.info(f"🔍 Debug: Available session keys: {list(st.session_state.keys())}")
+                elif not connection_details:
+                    st.error("❌ No database connection details found. Please go back to Schema Discovery and connect to your database.")
+                    st.info(f"🔍 Debug: Connection ID found but details missing: {connection_id}")
                 elif not selected_tables:
                     st.error("❌ No tables selected. Please go back to Table Analysis and select at least one table.")
                 elif len(selected_tables) == 0:
                     st.error("❌ Selected tables list is empty. Please go back to Table Analysis and select tables.")
                 else:
-                    st.success(f"✅ Validation passed: {len(selected_tables)} tables selected, connection ID: {connection_id[:8]}...")
+                    st.success(f"✅ Validation passed: {len(selected_tables)} tables selected, connection ID: {connection_id[:8] if len(connection_id) > 8 else connection_id}...")
+                    st.info(f"🔗 Connection details available: {bool(connection_details)}")
                     with st.spinner("🔍 AI is analyzing your schema for enum patterns..."):
                         try:
                             # Import the enum mapping generator
@@ -2736,23 +3592,39 @@ with tab3:
                             
                             st.session_state.enum_mapping_status = 'running'
                             
-                            # Get connection details
+                            # Get connection details - use session state first, fallback to database
                             import asyncio
-                            configurator_db = ConfiguratorDatabase()
-                            db_connection = asyncio.run(configurator_db.get_database_connection(st.session_state.connection_id))
                             
-                            if db_connection:
-                                # Convert database connection to dictionary format
-                                connection_details = {
-                                    "database_type": db_connection.database_type,
-                                    "host": db_connection.host,
-                                    "port": db_connection.port,
-                                    "database_name": db_connection.database_name,
-                                    "username": db_connection.username,
-                                    "password": db_connection.password,
-                                    "ssl_enabled": db_connection.ssl_enabled,
-                                    "connection_params": db_connection.connection_params or {}
-                                }
+                            if connection_details:
+                                # Use existing connection details from session state
+                                st.info("🔗 Using connection details from session state")
+                            else:
+                                # Fallback to database lookup
+                                st.info("🔄 Loading connection details from database...")
+                                configurator_db = ConfiguratorDatabase()
+                                db_connection = asyncio.run(configurator_db.get_database_connection(connection_id))
+                                
+                                if db_connection:
+                                    # Convert database connection to dictionary format
+                                    connection_details = {
+                                        "database_type": db_connection.database_type,
+                                        "host": db_connection.host,
+                                        "port": db_connection.port,
+                                        "database_name": db_connection.database_name,
+                                        "username": db_connection.username,
+                                        "password": db_connection.password,
+                                        "ssl_enabled": db_connection.ssl_enabled,
+                                        "connection_params": db_connection.connection_params or {}
+                                    }
+                                    # Store in session state for future use
+                                    st.session_state.db_connection_details = connection_details
+                                else:
+                                    st.error("❌ Could not load connection details from database")
+                                    st.session_state.enum_mapping_status = 'error'
+                                    st.stop()
+                            
+                            # Ensure we have connection details at this point
+                            if connection_details:
                                 
                                 # Generate enum mappings for selected tables only
                                 result = asyncio.run(generate_enum_mappings_for_connection(
@@ -2909,21 +3781,130 @@ with tab3:
             
             with content_col1:
                 st.markdown("**Business Rules**")
-                # Business Rules Template
-                business_rules_prompt = f"""Based on the selected database schema with {len(selected_columns)} columns from {domain_context} domain, 
-generate comprehensive business rules for SQL query generation. Include:
-- Table usage preferences and restrictions
-- Date filtering rules
-- Aggregation guidelines
-- Join requirements
-- Data quality considerations
+                # Generate detailed business rules from actual table analysis
+                business_rules_value = ""
+                
+                if 'comprehensive_template' in st.session_state and st.session_state.comprehensive_template:
+                    business_rules_value = st.session_state.comprehensive_template['business_rules']
+                else:
+                    # Generate business rules from database analysis
+                    from app.models.database.schema_analysis_models import TableAnalysisModel
+                    from app.core.database import SessionLocal
+                    import logging
+                    
+                    # Set up logging for debugging
+                    logging.basicConfig(level=logging.INFO)
+                    logger = logging.getLogger(__name__)
+                    
+                    try:
+                        logger.info("Starting business rules template generation")
+                        with SessionLocal() as db_session:
+                            connection_id = st.session_state.get('connection_id')
+                            logger.info(f"Using connection_id: {connection_id}")
+                            
+                            if connection_id:
+                                # Get all analyzed tables for this connection
+                                logger.info(f"Querying TableAnalysisModel for connection_id: {connection_id}")
+                                analyzed_tables = db_session.query(TableAnalysisModel).filter_by(
+                                    connection_id=connection_id
+                                ).order_by(TableAnalysisModel.analyzed_at.desc()).all()
+                                
+                                logger.info(f"Found {len(analyzed_tables)} analyzed tables")
+                                
+                                if analyzed_tables:
+                                    business_rules_parts = []
+                                    business_rules_parts.append("# Financial Domain Business Rules\n")
+                                    
+                                    for i, analysis in enumerate(analyzed_tables):
+                                        table_name = analysis.table_name
+                                        schema_name = analysis.schema_name
+                                        logger.info(f"Processing table {i+1}/{len(analyzed_tables)}: {schema_name}.{table_name}")
+                                        
+                                        # Extract business context
+                                        primary_purpose = analysis.primary_purpose or 'Data storage and management'
+                                        business_description = analysis.ai_business_description or 'No specific business description available'
+                                        key_columns = analysis.key_columns or []
+                                        business_processes = analysis.business_processes or []
+                                        columns_analysis = analysis.columns_analysis or []
+                                        
+                                        logger.info(f"Table {table_name}: {len(columns_analysis)} columns analyzed, confidence: {analysis.analysis_confidence:.1%}")
+                                        
+                                        business_rules_parts.append(f"""
+## Table: {table_name} ({schema_name} schema)
 
-Selected columns: {', '.join(list(selected_columns.keys())[:20])}{'...' if len(selected_columns) > 20 else ''}"""
+**Business Purpose**: {primary_purpose}
+
+**Description**: {business_description}
+
+**Key Business Information**:
+- Row Count: {analysis.row_count:,} records
+- Business Processes: {', '.join(business_processes) if business_processes else 'General data operations'}
+- Data Category: {analysis.data_category or 'Operational data'}
+- Analysis Confidence: {analysis.analysis_confidence:.1%}
+
+**Column Analysis & Business Rules**:""")
+                                        
+                                        # Add detailed column analysis with enum values
+                                        if columns_analysis:
+                                            logger.info(f"Processing {len(columns_analysis)} columns for table {table_name}")
+                                            for col_idx, col_data in enumerate(columns_analysis):
+                                                col_name = col_data.get('column_name', 'Unknown')
+                                                data_type = col_data.get('data_type', 'Unknown')
+                                                business_desc = col_data.get('business_description', 'No description')
+                                                enum_values = col_data.get('enum_values', [])
+                                                is_primary_key = col_data.get('is_primary_key', False)
+                                                is_foreign_key = col_data.get('is_foreign_key', False)
+                                                
+                                                if enum_values:
+                                                    logger.info(f"Column {col_name}: Found {len(enum_values)} enum values: {enum_values[:5]}{'...' if len(enum_values) > 5 else ''}")
+                                                
+                                                business_rules_parts.append(f"""
+- **{col_name}** ({data_type}): {business_desc}""")
+                                                
+                                                if enum_values:
+                                                    enum_str = ', '.join([f"'{val}'" for val in enum_values[:10]])
+                                                    if len(enum_values) > 10:
+                                                        enum_str += f" (and {len(enum_values) - 10} more)"
+                                                    business_rules_parts.append(f"  - Enum Values: [{enum_str}]")
+                                                
+                                                if is_primary_key:
+                                                    business_rules_parts.append(f"  - Primary Key: Use for unique identification and joins")
+                                                elif is_foreign_key:
+                                                    business_rules_parts.append(f"  - Foreign Key: Use for table relationships")
+                                        
+                                        # Add query guidelines
+                                        business_rules_parts.append(f"""
+**Query Guidelines for {table_name}**:
+- Use indexed columns ({', '.join(analysis.primary_keys or ['id'])}) for optimal performance
+- Apply appropriate date filtering on timestamp columns (created_at, updated_at)
+- Consider data quality when aggregating monetary amounts
+- Join with related tables using primary/foreign key relationships
+- Filter by status/type columns for business logic compliance
+
+**Common Query Patterns**:
+- Status-based filtering: WHERE status = 'ACTIVE'
+- Date range queries: WHERE created_at BETWEEN '2024-01-01' AND '2024-12-31'
+- Geographic filtering: WHERE state = 'Maharashtra' AND locality = 'Pune'
+- Lifecycle stage queries: WHERE level IN ('APPROVED', 'DISBURSED')
+
+---""")
+                                    
+                                    logger.info(f"Generated business rules template with {len(business_rules_parts)} sections")
+                                    business_rules_value = '\n'.join(business_rules_parts)
+                                else:
+                                    logger.warning("No analyzed tables found for connection")
+                                    business_rules_value = "No table analysis available. Please analyze tables first to generate detailed business rules."
+                            else:
+                                logger.error("No connection_id found in session state")
+                                business_rules_value = "No database connection found. Please connect to a database first."
+                    except Exception as e:
+                        logger.error(f"Error generating business rules: {str(e)}", exc_info=True)
+                        business_rules_value = f"Error generating business rules: {str(e)}"
                 
                 st.markdown('<div class="large-textarea">', unsafe_allow_html=True)
                 business_rules = st.text_area(
                     "Business Rules Template *",
-                    value=business_rules_prompt,
+                    value=business_rules_value,
                     height=350,
                     help="Business rules for query generation",
                     key="business_rules_input"
@@ -2932,27 +3913,126 @@ Selected columns: {', '.join(list(selected_columns.keys())[:20])}{'...' if len(s
             
             with content_col2:
                 st.markdown("**Schema Context**")
-                # Schema Context Template
-                schema_context_prompt = f"""Database Schema Context for {domain_context} domain:
+                # Generate detailed schema context from actual table analysis
+                schema_context_value = ""
+                
+                if 'comprehensive_template' in st.session_state and st.session_state.comprehensive_template:
+                    schema_context_value = st.session_state.comprehensive_template['schema_context']
+                else:
+                    # Generate schema context from database analysis
+                    try:
+                        logger.info("Starting schema context template generation")
+                        with SessionLocal() as db_session:
+                            connection_id = st.session_state.get('connection_id')
+                            logger.info(f"Using connection_id for schema context: {connection_id}")
+                            
+                            if connection_id:
+                                # Get all analyzed tables for this connection
+                                logger.info(f"Querying TableAnalysisModel for schema context, connection_id: {connection_id}")
+                                analyzed_tables = db_session.query(TableAnalysisModel).filter_by(
+                                    connection_id=connection_id
+                                ).order_by(TableAnalysisModel.analyzed_at.desc()).all()
+                                
+                                logger.info(f"Found {len(analyzed_tables)} tables for schema context generation")
+                                
+                                if analyzed_tables:
+                                    schema_context_parts = []
+                                    schema_context_parts.append("# Database Schema Context\n")
+                                    
+                                    for i, analysis in enumerate(analyzed_tables):
+                                        table_name = analysis.table_name
+                                        schema_name = analysis.schema_name
+                                        logger.info(f"Processing schema context for table {i+1}/{len(analyzed_tables)}: {schema_name}.{table_name}")
+                                        
+                                        # Extract technical specifications
+                                        primary_keys = analysis.primary_keys or []
+                                        foreign_keys = analysis.foreign_keys or []
+                                        columns_analysis = analysis.columns_analysis or []
+                                        
+                                        logger.info(f"Schema context - Table {table_name}: {len(primary_keys)} PKs, {len(foreign_keys)} FKs, {len(columns_analysis)} columns")
+                                        
+                                        schema_context_parts.append(f"""
+## Table: {table_name} ({schema_name})
 
-Selected Tables and Columns:
-{chr(10).join([f"- {col}" for col in list(selected_columns.keys())[:50]])}
-{'...' if len(selected_columns) > 50 else ''}
+**Technical Specifications**:
+- Row Count: {analysis.row_count:,}
+- Column Count: {analysis.column_count}
+- Table Type: {analysis.table_type or 'Standard'}
+- Storage Size: {analysis.size_bytes or 'Unknown'} bytes
 
-Key Relationships:
-- Identify primary and foreign key relationships
-- Document table join patterns
-- Specify important indexes and constraints
+**Primary Keys**: {', '.join(primary_keys) if primary_keys else 'None identified'}
+**Foreign Keys**: {len(foreign_keys)} relationships identified
 
-Data Types and Formats:
-- Document date/time column formats
-- Specify numeric precision requirements
-- Note text field limitations"""
+**Column Schema Details**:""")
+                                        
+                                        # Add detailed column schema information
+                                        if columns_analysis:
+                                            for col_data in columns_analysis:
+                                                col_name = col_data.get('column_name', 'Unknown')
+                                                data_type = col_data.get('data_type', 'Unknown')
+                                                is_nullable = col_data.get('is_nullable', True)
+                                                is_primary_key = col_data.get('is_primary_key', False)
+                                                is_foreign_key = col_data.get('is_foreign_key', False)
+                                                max_length = col_data.get('max_length')
+                                                default_value = col_data.get('default_value')
+                                                
+                                                key_indicator = ""
+                                                if is_primary_key:
+                                                    key_indicator = " [PK]"
+                                                elif is_foreign_key:
+                                                    key_indicator = " [FK]"
+                                                
+                                                nullable_indicator = "(NOT NULL)" if not is_nullable else "(nullable)"
+                                                
+                                                schema_context_parts.append(f"""
+- **{col_name}**: {data_type}{key_indicator} {nullable_indicator}""")
+                                                
+                                                if max_length:
+                                                    schema_context_parts.append(f"  - Max Length: {max_length}")
+                                                if default_value:
+                                                    schema_context_parts.append(f"  - Default: {default_value}")
+                                        
+                                        # Add relationship information
+                                        if foreign_keys:
+                                            schema_context_parts.append(f"""
+**Relationships**:""")
+                                            for fk in foreign_keys:
+                                                if isinstance(fk, dict):
+                                                    column = fk.get('column', 'unknown')
+                                                    referenced_table = fk.get('referenced_table', 'unknown')
+                                                    schema_context_parts.append(f"- {column} → {referenced_table}")
+                                        
+                                        # Add query optimization notes
+                                        schema_context_parts.append(f"""
+**Query Optimization**:
+- Indexed Columns: Primary keys and foreign keys
+- Join Performance: {'Optimized' if primary_keys else 'Consider adding indexes'}
+- Query Pattern: {'OLTP' if analysis.row_count < 1000000 else 'OLAP'} optimized
+- Best Practices: Use indexed columns for WHERE clauses and JOINs
+
+**Data Quality Notes**:
+- Analysis Confidence: {analysis.analysis_confidence:.1%}
+- Data Completeness: Review nullable columns for completeness
+- Referential Integrity: Validate foreign key relationships
+
+---""")
+                                    
+                                    logger.info(f"Generated schema context template with {len(schema_context_parts)} sections")
+                                    schema_context_value = '\n'.join(schema_context_parts)
+                                else:
+                                    logger.warning("No analyzed tables found for schema context generation")
+                                    schema_context_value = "No table analysis available. Please analyze tables first to generate detailed schema context."
+                            else:
+                                logger.error("No connection_id found in session state for schema context")
+                                schema_context_value = "No database connection found. Please connect to a database first."
+                    except Exception as e:
+                        logger.error(f"Error generating schema context: {str(e)}", exc_info=True)
+                        schema_context_value = f"Error generating schema context: {str(e)}"
                 
                 st.markdown('<div class="large-textarea">', unsafe_allow_html=True)
                 schema_context = st.text_area(
                     "Schema Context Template *",
-                    value=schema_context_prompt,
+                    value=schema_context_value,
                     height=350,
                     help="Schema context for query generation",
                     key="schema_context_input"
@@ -3333,7 +4413,7 @@ with tab5:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #666; margin-top: 2rem;">
-    <p>🎯 MiFiX.AI Configurator v1.0 - Main Structure Complete</p>
+    <p>🎯 MiFiX.AI Configurator v1.0 </p>
     <p>Next: Implementing query testing functionality</p>
 </div>
 """, unsafe_allow_html=True)

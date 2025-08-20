@@ -79,9 +79,31 @@ class TableAnalysisModel(Base):
     potential_relationships = Column(JSON, default=list)
     data_quality_notes = Column(JSON, default=list)
     
+    # Enhanced AI-powered analysis results
+    ai_business_description = Column(Text, nullable=True)  # LLM-generated business description
+    primary_purpose = Column(String(500), nullable=True)  # AI-identified primary purpose
+    data_category = Column(String(100), nullable=True)    # AI-identified category
+    parent_tables = Column(JSON, default=list)           # Parent table relationships
+    child_tables = Column(JSON, default=list)            # Child table relationships
+    key_columns = Column(JSON, default=list)             # AI-identified key columns
+    business_processes = Column(JSON, default=list)      # Supported business processes
+    typical_queries = Column(JSON, default=list)         # Common query patterns
+    join_patterns = Column(JSON, default=list)           # Join relationship patterns
+    
+    # Column-level analysis (comprehensive)
+    columns_analysis = Column(JSON, default=list)        # Detailed column analysis with enums
+    enum_columns = Column(JSON, default=list)            # Columns with enum values
+    sample_data = Column(JSON, default=list)             # Sample rows for context
+    
+    # Analysis versioning and caching
+    analysis_version = Column(String(50), default="1.0") # Version for cache invalidation
+    connection_id = Column(UUID(as_uuid=True), nullable=True, index=True)  # Source connection
+    schema_hash = Column(String(255), nullable=True)     # Hash of table schema for change detection
+    
     # Analysis metadata
     analyzed_at = Column(DateTime, default=datetime.utcnow)
     analysis_confidence = Column(Float, default=0.0)
+    analysis_duration_ms = Column(Float, nullable=True)  # Time taken for analysis
 
 
 class RelationshipAnalysisModel(Base):
